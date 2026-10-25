@@ -1,5 +1,5 @@
 import {
-  SUPABASE_URL, SUPABASE_KEY, AREA_NAME, MAP_CENTER, MAP_ZOOM, HISTORY_MINUTES, LOW_BATTERY_PCT, REPLAY,
+  SUPABASE_URL, SUPABASE_KEY, AREA_NAME, MAP_CENTER, MAP_ZOOM, HISTORY_MINUTES, LOW_BATTERY_PCT, REPLAY, RISK_BOUNDS,
 } from './config.js';
 import {
   STATUS, REPORT_KINDS, statusLabel, waterCm, evaluate, summarize, cmToIn,
@@ -8,6 +8,10 @@ import {
 import { Simulator } from './sim.js';
 import { notify, browserAlertState, enableBrowserAlerts } from './notify.js';
 import { MapView } from './mapview.js';
+import { RiskEngine } from './insight.js';
+import { femaZoneAt, describeZone } from './sources.js';
+import { icon } from './icons.js';
+import { welcomeHtml } from './welcome.js';
 
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const panel = document.getElementById('panel');
@@ -32,6 +36,9 @@ const state = {
   lowBattery: new Set(),
   muted: new Set(readMuted()),
   installPoint: null,
+  point: null,
+  sites: [],
+  femaCache: new Map(),
   chart: null,
   chartFor: null,
   channel: null,
@@ -79,16 +86,32 @@ const map = new MapView('map', {
   center: MAP_CENTER,
   zoom: MAP_ZOOM,
   onSelect: (id) => selectSensor(id),
+  onSiteSelect: (k) => openSite(k),
+  onRiskMode: (mode) => {
+    risk.setMode(mode);
+    refreshLive();
+  },
   onMapClick: (latlng) => {
-    if (state.view !== 'install') return;
-    state.installPoint = latlng;
-    map.setPin(latlng, true).off('dragend').on('dragend', (e) => {
-      state.installPoint = e.target.getLatLng();
-      fillInstallPoint();
-    });
-    fillInstallPoint();
+    if (state.view === 'install') {
+      setInstallPoint(latlng);
+    } else if (state.view === 'report') {
+      map.setPin(latlng, true);
+    } else {
+      openPoint(latlng);
+    }
   },
 });
+
+function setInstallPoint(latlng) {
+  state.installPoint = latlng;
+  map.setPin(latlng, true).off('dragend').on('dragend', (e) => {
+    state.installPoint = e.target.getLatLng();
+    fillInstallPoint();
+  });
+  fillInstallPoint();
+}
+
+const risk = new RiskEngine({ bounds: RISK_BOUNDS, center: MAP_CENTER, onUpdate: (kind) => onRiskUpdate(kind) });
 
 const sim = new Simulator({
   getSensors: () => state.sensors,
@@ -248,11 +271,23 @@ async function loadIdentity(token) {
 
   const points = state.sensors.filter((s) => s.mode === 'street' && s.lat != null).map((s) => [s.lat, s.lng]);
   map.fit(points);
+  updateSites();
   state.ready = true;
   renderAll();
 }
 
+let modeBeforeReplay = null;
+
 function onReplayChange(kind) {
+  if (kind === 'start') {
+    modeBeforeReplay = risk.mode;
+    risk.setMode('now');
+    map.setRiskMode('now');
+  } else if (kind === 'stop' && modeBeforeReplay) {
+    risk.setMode(modeBeforeReplay);
+    map.setRiskMode(modeBeforeReplay);
+    modeBeforeReplay = null;
+  }
   const driven = state.sensors.filter((s) => s.mode === 'street' && (s.is_simulated || (kind === 'start' && sim.includeReal) || (kind === 'stop' && !s.is_simulated)));
   for (const s of driven) {
     for (const r of state.readings.get(s.id) || []) state.seen.delete(r.id);
@@ -368,7 +403,7 @@ function renderTopbar() {
 }
 
 function tabFor(view) {
-  if (view === 'report') return 'public';
+  if (view === 'report' || view === 'point') return 'public';
   if (view === 'install') return 'municipal';
   return view;
 }
@@ -377,6 +412,7 @@ function renderPanel() {
   destroyChart();
   const views = {
     public: () => (state.selectedId ? streetDetailView() : publicListView()),
+    point: pointView,
     report: reportView,
     auth: authView,
     account: accountView,
@@ -396,14 +432,24 @@ function publicListView() {
       <h1>Street flood conditions</h1>
       <p class="muted">${escapeHtml(AREA_NAME)}</p>
     </header>
-    <p class="summary" data-live="summary"></p>
-    <div class="sensor-list" data-live="street-list"></div>
+    <div data-live="area"></div>
+    <p class="hint">${icon('target')}<span>Click anywhere on the map to see the flood risk at that spot and why.</span></p>
+    <section class="section tight">
+      <div class="section-head"><h2>Street sensors</h2></div>
+      <p class="summary" data-live="summary"></p>
+      <div class="sensor-list" data-live="street-list"></div>
+    </section>
     <section class="section">
       <div class="section-head">
         <h2>Community reports</h2>
         <button class="btn btn-secondary btn-small" data-action="report-start">Report flooding</button>
       </div>
       <div data-live="report-list"></div>
+    </section>
+    <section class="section">
+      <div class="section-head"><h2>Where sensors are needed next</h2></div>
+      <p class="muted small">Low spots on roads with no sensor nearby, ranked by how easily water collects there.</p>
+      <div data-live="sites"></div>
     </section>
     ${footer()}`;
 }
@@ -431,6 +477,10 @@ function streetDetailView() {
     <div data-live="stats"></div>
     <div class="chart-wrap"><canvas id="chart" aria-label="Water level over the last hour"></canvas></div>
     <div data-live="detail-actions"></div>
+    <section class="section">
+      <h2>Why this spot floods</h2>
+      <div data-live="site-profile"></div>
+    </section>
     <p class="fine">${s.is_simulated ? 'Simulated sensor used to demonstrate the network. ' : ''}Depth is measured from the road surface directly below the sensor. Roads are marked impassable at ${fmtIn(s.alert_depth_cm)}, the depth at which moving water can stall most cars.</p>
     ${footer()}`;
 }
@@ -592,6 +642,10 @@ function municipalView() {
       </header>
       <div data-live="stats"></div>
       <div class="chart-wrap"><canvas id="chart" aria-label="Water level over the last hour"></canvas></div>
+      <section class="section">
+        <h2>Why this spot floods</h2>
+        <div data-live="site-profile"></div>
+      </section>
       ${s.owner_id === userId() ? sensorSettings(s, 'road') : '<p class="muted">This sensor is managed by another municipal account.</p>'}`;
   }
   return `
@@ -601,9 +655,14 @@ function municipalView() {
     </header>
     <div data-live="health"></div>
     <section class="section">
-      <h2>Install a sensor</h2>
-      <p>Choose a location on the map, enter the mounting details, and the sensor gets a device key for its firmware.</p>
-      <button class="btn" data-action="install-start">Place a new sensor</button>
+      <h2>Recommended sites</h2>
+      <p class="muted small">Ranked from elevation, drainage, and road data. Each site is at least 850 ft from an existing sensor.</p>
+      <div data-live="sites"></div>
+    </section>
+    <section class="section">
+      <h2>Install a sensor somewhere else</h2>
+      <p>Choose any location on the map, enter the mounting details, and the sensor gets a device key for its firmware.</p>
+      <button class="btn btn-secondary" data-action="install-start">Place a new sensor</button>
     </section>`;
 }
 
@@ -629,6 +688,279 @@ function installView() {
     <div data-live="message"></div>`;
 }
 
+
+// Risk, weather, points, and sites ------------------------------------------
+
+function onRiskUpdate(kind) {
+  if (kind === 'terrain' || kind === 'roads') updateSites();
+  if (kind === 'terrain' && risk.terrainStatus === 'failed') map.setRiskStatus('Elevation data could not load. Showing sensors and reports only.');
+  if (kind === 'terrain' && risk.ready) map.setRiskStatus('');
+  refreshLive();
+}
+
+function updateSites() {
+  state.sites = risk.sites(state.sensors.filter((s) => s.mode === 'street'));
+  map.setSites(state.sites);
+}
+
+const OBS_STRENGTH = { flooding: 1, warning: 0.7, rising: 0.4 };
+
+function observationPoints() {
+  const points = [];
+  for (const s of state.sensors) {
+    if (s.mode !== 'street' || s.lat == null) continue;
+    const ev = state.evals.get(s.id);
+    const strength = ev && OBS_STRENGTH[ev.key];
+    if (strength) points.push({ lat: s.lat, lng: s.lng, strength });
+  }
+  for (const r of activeReports()) points.push({ lat: r.lat, lng: r.lng, strength: 0.6 });
+  return points;
+}
+
+function feet(n) {
+  return `${Math.round(n).toLocaleString()} ft`;
+}
+
+function distanceFt(a, b) {
+  const R = 20902231;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b[0] - a[0]);
+  const dLng = toRad(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function rainLine() {
+  if (sim.running) return `Storm replay: ${sim.rainfall().toFixed(1)} in of rain per hour.`;
+  const w = risk.weather;
+  if (!w) return 'Loading the National Weather Service forecast...';
+  if (w.error) return 'Weather forecast unavailable right now.';
+  const parts = [];
+  if (w.summary) parts.push(`${w.summary}${w.tempF != null ? `, ${w.tempF}°F` : ''}.`);
+  if (w.rainChance != null) parts.push(`${w.rainChance}% chance of rain in the next 6 hours.`);
+  if (w.rain24In != null) parts.push(`${w.rain24In < 0.05 ? 'Under 0.1' : w.rain24In.toFixed(1)} in expected over 24 hours.`);
+  return parts.join(' ');
+}
+
+function sensorLevel() {
+  const keys = state.sensors.filter((s) => s.mode === 'street').map((s) => state.evals.get(s.id)?.key);
+  if (keys.includes('flooding')) return 'severe';
+  if (keys.includes('warning')) return 'high';
+  if (keys.includes('rising')) return 'moderate';
+  return 'low';
+}
+
+function areaHtml() {
+  const area = risk.areaLevel();
+  const order = ['low', 'moderate', 'high', 'severe'];
+  const fromSensors = sensorLevel();
+  let level = area ? area.level : null;
+  if (!level || order.indexOf(fromSensors) > order.indexOf(level.key)) {
+    level = { low: { label: 'Low', color: '#2f7d4f' }, moderate: { label: 'Moderate', color: '#a87a00' }, high: { label: 'High', color: '#d0610b' }, severe: { label: 'Severe', color: '#c0392b' } }[fromSensors];
+  }
+  const flooding = state.sensors.filter((s) => s.mode === 'street' && state.evals.get(s.id)?.key === 'flooding').map((s) => s.name);
+  const w = risk.weather;
+  let reason;
+  if (flooding.length) reason = `Sensors report water over the road at ${flooding.join(' and ')}.`;
+  else if (sim.running) reason = 'Heavy rain in the replay. Low spots like the bottom of the Mt. Pleasant Ave hill fill first.';
+  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.5) reason = 'Steady rain in the forecast. Low spots may start to collect water.';
+  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.05) reason = 'Light rain in the forecast. Street flooding is unlikely.';
+  else if (w && !w.error) reason = 'No meaningful rain in the forecast, and no sensor shows water on the road.';
+  else reason = 'Based on sensor readings and terrain.';
+  const alerts = w && !w.error && w.alerts.length
+    ? `<div class="nws-alert">${icon('info')}<div><strong>${escapeHtml(w.alerts.map((a) => a.event).join(', '))}</strong><span>Issued by the National Weather Service for this area.</span></div></div>`
+    : '';
+  return `
+    <section class="area-card" style="--c:${level.color}">
+      <span class="area-label">Flood risk in this area right now</span>
+      <span class="area-level">${level.label}</span>
+      <p class="area-reason">${reason}</p>
+      <p class="weather-line">${icon('rain')}<span>${escapeHtml(rainLine())}</span></p>
+      ${alerts}
+    </section>`;
+}
+
+function sparkline(sensor) {
+  const list = state.readings.get(sensor.id) || [];
+  const pts = list.slice(-60).map((r) => waterCm(sensor, r) ?? 0);
+  if (pts.length < 2) return '<svg class="spark" viewBox="0 0 80 24" aria-hidden="true"></svg>';
+  const max = Math.max(sensor.alert_depth_cm, ...pts) || 1;
+  const step = 80 / (pts.length - 1);
+  const line = pts.map((v, k) => `${(k * step).toFixed(1)},${(22 - (v / max) * 20).toFixed(1)}`).join(' ');
+  const alertY = (22 - (sensor.alert_depth_cm / max) * 20).toFixed(1);
+  return `<svg class="spark" viewBox="0 0 80 24" aria-hidden="true"><line x1="0" x2="80" y1="${alertY}" y2="${alertY}" class="spark-alert"/><polyline points="${line}" class="spark-line"/></svg>`;
+}
+
+function femaFor(lat, lng) {
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  if (!state.femaCache.has(key)) {
+    state.femaCache.set(key, { status: 'loading' });
+    femaZoneAt(lat, lng)
+      .then((zone) => state.femaCache.set(key, { status: 'ok', text: describeZone(zone) }))
+      .catch(() => state.femaCache.set(key, { status: 'failed', text: 'FEMA flood map service did not respond' }))
+      .finally(() => fillLive());
+  }
+  return state.femaCache.get(key);
+}
+
+function factorRows(lat, lng, info, { skipSensorId = null } = {}) {
+  const rows = [];
+  const add = (ic, title, text) => rows.push(`<li>${icon(ic)}<div><strong>${title}</strong><span>${text}</span></div></li>`);
+  if (info && !info.outside) {
+    const rel = (ft, radius) => (ft >= 1 ? `${Math.round(ft)} ft lower than` : ft <= -1 ? `${Math.round(-ft)} ft higher than` : 'about level with')
+      + ` the ground within ${feet(Math.round(radius / 50) * 50)}`;
+    add('mountain', `Elevation ${Math.round(info.elevFt)} ft`, `${rel(info.localFt, info.localRadiusFt)}, and ${rel(info.broadFt, info.broadRadiusFt)}.`);
+    add('wave', 'Drainage', info.acres >= 0.5
+      ? `Runoff from about ${info.acres >= 10 ? Math.round(info.acres) : info.acres.toFixed(1)} acres of surrounding land flows through this spot.`
+      : 'Very little runoff flows here. Water tends to drain away from this spot.');
+    add('drain', 'Ponding', info.pondFt >= 0.3
+      ? `Sits in a dip that could hold about ${info.pondFt.toFixed(1)} ft of standing water if storm drains back up.`
+      : 'Not in a closed dip, so water has a way to drain off.');
+  }
+  const fema = femaFor(lat, lng);
+  add('shield', 'FEMA flood map', fema.status === 'loading' ? 'Checking the National Flood Hazard Layer...' : escapeHtml(fema.text));
+  add('rain', 'Weather', escapeHtml(rainLine()));
+  const street = state.sensors.filter((s) => s.mode === 'street' && s.lat != null && s.id !== skipSensorId);
+  if (street.length) {
+    const nearest = street
+      .map((s) => ({ s, d: distanceFt([lat, lng], [s.lat, s.lng]) }))
+      .sort((a, b) => a.d - b.d)[0];
+    const ev = state.evals.get(nearest.s.id);
+    add('sensor', 'Nearest other sensor', `${escapeHtml(nearest.s.name)}, ${feet(nearest.d)} away, ${ev ? STATUS[ev.key].label.toLowerCase() : 'no data'}${ev && ev.water != null && ev.key !== 'offline' ? ` at ${fmtIn(ev.water)}` : ''}.`);
+  }
+  const near = activeReports().filter((r) => distanceFt([lat, lng], [r.lat, r.lng]) <= 1000);
+  add('pin', 'Community reports', near.length ? `${near.length} active report${near.length > 1 ? 's' : ''} within 1,000 ft.` : 'None within 1,000 ft.');
+  return `<ul class="factors">${rows.join('')}</ul>`;
+}
+
+function openPoint(latlng) {
+  state.view = 'point';
+  state.selectedId = null;
+  state.point = [latlng.lat, latlng.lng];
+  state.pointTitle = null;
+  map.setPin(latlng, false);
+  renderAll();
+}
+
+function openSite(k) {
+  const site = state.sites[k];
+  if (!site) return;
+  state.view = 'point';
+  state.selectedId = null;
+  state.point = [site.lat, site.lng];
+  state.pointTitle = `Recommended site ${k + 1}${site.road ? `: ${site.road}` : ''}`;
+  map.setPin(L.latLng(site.lat, site.lng), false);
+  map.focus([site.lat, site.lng]);
+  renderAll();
+}
+
+function pointView() {
+  const [lat, lng] = state.point;
+  return `
+    <button class="back" data-action="point-back">Back to the map</button>
+    <header class="detail-head">
+      <h1>${escapeHtml(state.pointTitle || 'Flood risk at this spot')}</h1>
+      <p class="muted mono">${lat.toFixed(5)}, ${lng.toFixed(5)}</p>
+    </header>
+    <div data-live="point"></div>
+    <div class="point-actions">
+      <button class="btn btn-secondary" data-action="report-here">Report flooding here</button>
+      ${isOfficial() ? '<button class="btn" data-action="install-here">Install a sensor here</button>' : ''}
+    </div>
+    ${footer()}`;
+}
+
+function pointHtml() {
+  const [lat, lng] = state.point;
+  const info = risk.analyze(lat, lng);
+  let head = '';
+  if (!risk.ready) {
+    head = `<p class="muted">${risk.terrainStatus === 'failed' ? 'Elevation data is unavailable, so only nearby readings are shown.' : 'Loading elevation data...'}</p>`;
+  } else if (info.outside) {
+    head = '<p class="muted">This spot is outside the area FloodMesh has analyzed. Terrain risk covers about a mile around the pilot sensors.</p>';
+  } else {
+    const rankText = rankSentence(info);
+    head = `
+      <div class="risk-pair">
+        <div style="--c:${info.levelNow.color}"><span class="readout-label">Right now</span><span class="risk-word">${info.levelNow.label}</span></div>
+        <div style="--c:${info.levelHeavy.color}"><span class="readout-label">During heavy rain</span><span class="risk-word">${info.levelHeavy.label}</span></div>
+      </div>
+      <p class="rank-line">${rankText}</p>`;
+  }
+  return `${head}<h2 class="factor-head">What goes into this</h2>${factorRows(lat, lng, info && !info.outside ? info : null)}
+    <p class="fine">Terrain analysis uses USGS 3DEP elevation at about 50 ft resolution. It estimates where water collects; it is not an official flood determination.</p>`;
+}
+
+function topShare(rank) {
+  const pct = Math.max(1, Math.ceil((1 - rank) * 100));
+  return `Top ${pct}%`;
+}
+
+function rankSentence(info) {
+  const where = info.rankAgainstRoads ? 'road spots' : 'spots';
+  if (info.rank >= 0.99) return `One of the most flood-prone ${where} in the analyzed area (top 1%).`;
+  if (info.rank >= 0.5) return `More flood-prone than ${Math.round(info.rank * 100)}% of ${where} in the analyzed area.`;
+  return `Less flood-prone than ${Math.round((1 - info.rank) * 100)}% of ${where} in the analyzed area.`;
+}
+
+function siteProfileHtml(s) {
+  if (s.lat == null) return '';
+  const info = risk.analyze(s.lat, s.lng);
+  const head = info && !info.outside
+    ? `<p>Terrain flood risk here: <strong style="color:${info.levelHeavy.color}">${info.levelHeavy.label}</strong> during heavy rain. ${rankSentence(info)}</p>`
+    : `<p class="muted">${risk.terrainStatus === 'failed' ? 'Elevation data unavailable.' : 'Loading elevation data...'}</p>`;
+  return head + factorRows(s.lat, s.lng, info && !info.outside ? info : null, { skipSensorId: s.id });
+}
+
+function sitesHtml() {
+  if (!risk.ready) return `<p class="muted">${risk.terrainStatus === 'failed' ? 'Site ranking needs elevation data, which could not load.' : 'Ranking locations from elevation data...'}</p>`;
+  if (!state.sites.length) return '<p class="muted">Every low spot in the analyzed area is already within range of a sensor.</p>';
+  return `<ol class="site-list">${state.sites.map((site, k) => `
+    <li>
+      <span class="site-marker small"><span>${k + 1}</span></span>
+      <div class="site-text">
+        <strong>${escapeHtml(site.road || 'Unnamed location')}</strong>
+        <span>${topShare(site.rank)} of road spots for flood risk. Runoff from about ${site.acres >= 10 ? Math.round(site.acres) : site.acres.toFixed(1)} acres drains here.</span>
+        <div class="site-actions">
+          <button class="link-btn" data-action="site" data-k="${k}">View details</button>
+          ${isOfficial() ? `<button class="link-btn" data-action="install-site" data-k="${k}">Install here</button>` : ''}
+        </div>
+      </div>
+    </li>`).join('')}</ol>`;
+}
+
+// Welcome --------------------------------------------------------------------
+
+function showWelcome(scrollToHow = false) {
+  const el = document.getElementById('welcome');
+  el.innerHTML = welcomeHtml();
+  el.hidden = false;
+  document.body.classList.add('welcome-open');
+  el.scrollTop = 0;
+  const how = el.querySelector('#how-it-works');
+  if (scrollToHow && how && how.scrollIntoView) how.scrollIntoView();
+}
+
+function hideWelcome(go) {
+  const el = document.getElementById('welcome');
+  el.hidden = true;
+  document.body.classList.remove('welcome-open');
+  try {
+    localStorage.setItem('floodmesh-welcomed', '1');
+  } catch {
+    /* ignore */
+  }
+  if (go === 'auth') {
+    state.authMode = 'signin';
+    goTo('auth');
+  } else if (go === 'home') {
+    goTo('home');
+  } else {
+    goTo('public');
+  }
+  map.resize();
+}
+
 // Live regions -----------------------------------------------------------
 
 function refreshLive() {
@@ -636,6 +968,10 @@ function refreshLive() {
   state.evals = new Map(state.sensors.map((s) => [s.id, evaluate(s, latestOf(s.id), now)]));
   map.setSensors(state.sensors.filter((s) => s.mode === 'street'), state.evals, state.selectedId);
   map.setReports(activeReports());
+  risk.replayRain = sim.running ? sim.rainfall() : null;
+  risk.setObservations(observationPoints());
+  const image = risk.render();
+  if (image) map.setRiskImage(image.url, image.bounds);
   fillLive();
   renderReplayStatus();
   checkAlerts();
@@ -651,6 +987,15 @@ function fillLive() {
 
   const summary = live('summary');
   if (summary) summary.textContent = state.ready ? summarize(items) : 'Loading sensors...';
+
+  const area = live('area');
+  if (area) area.innerHTML = areaHtml();
+
+  const sites = live('sites');
+  if (sites) sites.innerHTML = sitesHtml();
+
+  const point = live('point');
+  if (point && state.point) point.innerHTML = pointHtml();
 
   const list = live('street-list');
   if (list) list.innerHTML = street.map(sensorRow).join('') || '<p class="muted">No street sensors yet.</p>';
@@ -680,6 +1025,9 @@ function fillLive() {
   const stats = live('stats');
   if (s && stats) stats.innerHTML = statsHtml(s, state.evals.get(s.id));
 
+  const profile = live('site-profile');
+  if (s && profile) profile.innerHTML = siteProfileHtml(s);
+
   const actions = live('detail-actions');
   if (s && actions) {
     const muted = state.muted.has(s.id);
@@ -698,6 +1046,7 @@ function sensorRow({ sensor: s, ev }) {
       <span class="sensor-value">${value}</span>
       <span class="sensor-note">${escapeHtml(s.location_note || '')}</span>
       <span class="sensor-status">${statusLabel(s, ev.key)}</span>
+      <span class="sensor-spark">${sparkline(s)}</span>
     </button>`;
 }
 
@@ -871,10 +1220,11 @@ function renderDemo() {
 // Actions ----------------------------------------------------------------
 
 function goTo(view, selectedId = null) {
-  if ((state.view === 'report' || state.view === 'install') && view !== state.view) {
+  if ((state.view === 'report' || state.view === 'install' || state.view === 'point') && view !== state.view) {
     map.clearPin();
     state.installPoint = null;
   }
+  if (view !== 'point') state.point = null;
   state.view = view;
   state.selectedId = selectedId;
   renderAll();
@@ -956,6 +1306,36 @@ async function handleAction(action, el) {
       break;
     case 'replay-stop':
       sim.stop();
+      break;
+    case 'point-back':
+      goTo('public');
+      break;
+    case 'site':
+      openSite(Number(el.dataset.k));
+      break;
+    case 'install-site': {
+      const site = state.sites[Number(el.dataset.k)];
+      if (!site) break;
+      goTo('install');
+      setInstallPoint(L.latLng(site.lat, site.lng));
+      const name = panel.querySelector('[name="name"]');
+      if (name && site.road) name.value = `${site.road} low point`;
+      break;
+    }
+    case 'install-here': {
+      const [lat, lng] = state.point;
+      goTo('install');
+      setInstallPoint(L.latLng(lat, lng));
+      break;
+    }
+    case 'report-here': {
+      const [lat, lng] = state.point;
+      goTo('report');
+      map.setPin(L.latLng(lat, lng), true);
+      break;
+    }
+    case 'how':
+      showWelcome(true);
       break;
     default:
       break;
@@ -1082,6 +1462,7 @@ async function submitInstall(form) {
   state.sensors.push(data);
   map.clearPin();
   state.installPoint = null;
+  updateSites();
   goTo('municipal', data.id);
   await revealKey(data.id);
 }
@@ -1200,12 +1581,29 @@ document.getElementById('replay-status').addEventListener('click', (e) => {
   if (e.target.closest('[data-action="replay-stop"]')) sim.stop();
 });
 
+document.getElementById('welcome').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-welcome]');
+  if (!btn) return;
+  if (btn.dataset.welcome === 'how') {
+    const how = document.getElementById('how-it-works');
+    if (how && how.scrollIntoView) how.scrollIntoView({ behavior: 'smooth' });
+  } else {
+    hideWelcome(btn.dataset.welcome);
+  }
+});
+
+document.getElementById('how-btn').addEventListener('click', () => showWelcome(true));
+
 document.getElementById('demo').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-demo]');
   if (btn) handleDemo(btn.dataset.demo);
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !document.getElementById('welcome').hidden) {
+    hideWelcome('public');
+    return;
+  }
   if (e.target instanceof Element && e.target.closest('input, textarea, select')) return;
   if (e.shiftKey && e.key.toLowerCase() === 'd') toggleDemo();
 });
@@ -1225,8 +1623,17 @@ async function start() {
     // Supabase recommends deferring async work out of this callback.
     setTimeout(() => onIdentityChange(), 0);
   });
+  let welcomed = false;
+  try {
+    welcomed = localStorage.getItem('floodmesh-welcomed') === '1';
+  } catch {
+    welcomed = false;
+  }
+  if (!welcomed) showWelcome();
+  risk.init();
   await onIdentityChange(true);
   setInterval(refreshLive, 1000);
+  setInterval(() => risk.refreshWeather(), 15 * 60000);
   setInterval(pollReadings, 15000);
   setInterval(() => loadReports(), 60000);
   window.addEventListener('resize', () => map.resize());

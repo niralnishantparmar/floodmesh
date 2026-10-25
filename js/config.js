@@ -11,6 +11,9 @@ export const AREA_NAME = 'Mt. Pleasant Ave area, Edison, NJ';
 export const MAP_CENTER = [40.5784, -74.3657];
 export const MAP_ZOOM = 16;
 
+// Area analyzed for terrain flood risk: roughly 3 km square around the pilot sensors.
+export const RISK_BOUNDS = [[40.5649, -74.3832], [40.5919, -74.3482]];
+
 // Devices post every 10 seconds, so two minutes of silence means trouble.
 export const OFFLINE_AFTER_SEC = 120;
 export const HISTORY_MINUTES = 60;

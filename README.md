@@ -9,7 +9,9 @@ The same sensor also works indoors. A homeowner can place one in a basement and 
 ## What the app does
 
 **For residents and drivers**
-- Live map of street sensors, colored by status (normal, rising, warning, flooding, offline)
+- Flood risk heatmap built from USGS elevation data, scaled by the National Weather Service rain forecast and live readings
+- Click any spot for a breakdown: elevation relative to the surrounding ground, how much land drains there, whether it sits in a dip, its FEMA flood zone, the weather, and nearby sensors and reports
+- Live map of street sensors, drawn as gauges that fill as water approaches the flooding line
 - Water depth above the road, trend, and an estimate of when the road becomes impassable
 - In-app alerts when a sensor starts rising or floods
 - Community reports: drag a pin to a flooded road or blocked drain and submit it; reports expire after four hours
@@ -20,6 +22,7 @@ The same sensor also works indoors. A homeowner can place one in a basement and 
 - Calibration from the app (no reflashing needed)
 
 **For municipal staff**
+- Ranked list of road locations that most need a sensor, skipping areas existing sensors already cover
 - Network health table: status, last reading, and battery for every street sensor
 - Install a new sensor by placing it on the map; the app issues its device key
 - Street sensors can only be created by accounts verified as municipal staff
@@ -37,6 +40,17 @@ Web app: live updates, status logic, alerts, map
 ```
 
 The sensor measures the distance from its face down to the water. Depth is the dry-level distance minus the current distance, so recalibrating in the app corrects all past readings too.
+
+### Flood risk model (`js/risk.js`)
+
+Elevation comes from AWS Terrain Tiles (USGS 3DEP, about 10 m source resolution), resampled to a 14.5 m grid over a 3 km square around the pilot sensors. Each cell is scored from four terrain signals:
+
+- How much lower it is than the ground within 500 ft (30%)
+- How much lower it is than the ground within 1,600 ft (20%)
+- How much upstream land drains through it, from D8 flow accumulation after priority-flood sink filling (30%)
+- Whether it sits in a closed dip that holds water, and how deep (20%)
+
+The terrain score is scaled by expected rainfall intensity from the NWS forecast (or the replay), and every sensor reading water or community report adds a hotspot around it. Recommended sensor sites are the highest-scoring road cells (roads from OpenStreetMap) that are at least 850 ft from an existing sensor and 720 ft from each other.
 
 Status rules (in `js/logic.js`):
 - **Flooding**: depth at or above the impassable threshold (6 in by default for streets)
@@ -76,7 +90,10 @@ supabase/seed.sql              Pilot sensors for the Mt. Pleasant Ave area
 
 ## Data and libraries
 
-- Map tiles: © OpenStreetMap contributors, © CARTO
+- Elevation: USGS 3DEP via AWS Terrain Tiles
+- Weather and alerts: National Weather Service API
+- Flood zones: FEMA National Flood Hazard Layer
+- Roads and map tiles: © OpenStreetMap contributors
 - [Leaflet](https://leafletjs.com) for the map, [Chart.js](https://www.chartjs.org) for charts
 - [Supabase](https://supabase.com) for the database, authentication, and live updates
 
