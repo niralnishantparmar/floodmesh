@@ -329,6 +329,8 @@ code { font-family: var(--mono); font-size: 12.5px; }
 .report-popup p { margin: 6px 0; }
 .report-popup span { display: block; color: var(--muted); font-size: 12px; }
 .leaflet-container { font-family: var(--font); }
+/* OpenStreetMap tiles are colorful; mute them so sensor status colors stand out. */
+.tiles-muted { filter: grayscale(0.85) contrast(0.9) brightness(1.05); }
 .leaflet-tooltip { font-weight: 600; }
 
 /* Demo controls ---------------------------------------------------------- */
