@@ -1,10 +1,3 @@
-// Terrain flood susceptibility.
-// Works on a plain elevation grid (row-major Float32Array, meters) so it can be
-// tested without a browser. Four terrain signals are combined:
-//   1. How much lower a spot is than the ground within about 500 ft
-//   2. How much lower it is than the ground within about 1,600 ft
-//   3. How much upstream area drains through it (flow accumulation)
-//   4. Whether it sits in a closed dip that holds water (sink depth)
 
 const DIRS = [
   [-1, -1, Math.SQRT2], [0, -1, 1], [1, -1, Math.SQRT2],
@@ -84,8 +77,6 @@ class MinHeap {
   }
 }
 
-// Priority-flood sink filling (Barnes et al. 2014). With eps > 0 every filled
-// cell still slopes gently toward an outlet, which lets flow routing cross flats.
 export function priorityFlood(elev, w, h, eps = 0) {
   const n = w * h;
   const filled = Float32Array.from(elev);
@@ -121,8 +112,6 @@ export function priorityFlood(elev, w, h, eps = 0) {
   return filled;
 }
 
-// D8 flow accumulation: each cell passes its water to its steepest downhill neighbor.
-// Returns the number of cells (including itself) that drain through each cell.
 export function flowAccumulation(dem, w, h) {
   const n = w * h;
   const order = new Int32Array(n);
@@ -199,16 +188,13 @@ export function buildTerrainModel(elev, w, h, cellM) {
   }
   const smooth = boxMean(raw, w, h, 1);
   const score = normalize(smooth, 0.02, 0.995);
-  // smooth keeps the unclamped ordering, used to break ties among top-scoring cells
   return { w, h, cellM, elev, tpiLocal, tpiBroad, acc, pond, score, rank: smooth, rLocalM: rLocal * cellM, rBroadM: rBroad * cellM };
 }
 
-// Rain scales how much the terrain matters right now.
 export function weatherFactor(rainInPerHr) {
   return 0.12 + 0.88 * Math.min(1, Math.max(0, rainInPerHr) / 1.0);
 }
 
-// observations: [{ i, j, strength }] in grid cells, strength 0..1
 export function liveRisk(model, factor, observations, sigmaM = 90) {
   const { w, h, score, cellM } = model;
   const out = new Float32Array(w * h);
@@ -276,7 +262,6 @@ export function riskLevel(v) {
   return RISK_LEVELS.find((l) => v < l.max) || RISK_LEVELS[RISK_LEVELS.length - 1];
 }
 
-// Value at a given fraction of the way up the sorted distribution.
 export function quantile(values, p, mask = null) {
   const picked = [];
   for (let i = 0; i < values.length; i += 1) if (!mask || mask[i]) picked.push(values[i]);
@@ -285,7 +270,6 @@ export function quantile(values, p, mask = null) {
   return percentile(picked, p);
 }
 
-// Share of cells (optionally within mask) with a lower score than this one.
 export function percentRank(values, idx, mask = null) {
   let below = 0;
   let total = 0;
@@ -298,7 +282,6 @@ export function percentRank(values, idx, mask = null) {
   return total ? below / total : 0;
 }
 
-// Pick the highest-scoring spots that are spread apart and away from existing sensors.
 export function recommendSites(model, { mask = null, existing = [], count = 5, minSepM = 220, avoidM = 260, minScore = 0.55 } = {}) {
   const { w, h, score, cellM } = model;
   const order = model.rank || score;

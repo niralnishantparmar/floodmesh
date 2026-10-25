@@ -1,11 +1,9 @@
-import { loadTerrain, loadWeather, loadRoads, rasterizeRoads } from './sources.js';
+import { loadTerrain, loadWeather, loadRoads, rasterizeRoads, loadHourlyRain } from './sources.js';
 import {
   buildTerrainModel, liveRisk, weatherFactor, colorize, recommendSites, riskLevel, quantile, percentRank,
   SQM_PER_ACRE, FT_PER_M,
 } from './risk.js';
 
-// Owns everything behind the risk heatmap. Each source loads on its own, and the
-// app gets a callback whenever something new is ready.
 export class RiskEngine {
   constructor({ bounds, center, onUpdate }) {
     this.bounds = bounds;
@@ -42,12 +40,12 @@ export class RiskEngine {
   }
 
   async refreshWeather() {
-    try {
-      this.weather = await loadWeather(this.center[0], this.center[1]);
-    } catch (err) {
-      console.warn('Weather unavailable', err);
-      this.weather = { error: true };
-    }
+    const [weather, hourly] = await Promise.allSettled([
+      loadWeather(this.center[0], this.center[1]),
+      loadHourlyRain(this.center[0], this.center[1]),
+    ]);
+    this.weather = weather.status === 'fulfilled' ? weather.value : { error: true };
+    this.hourlyRain = hourly.status === 'fulfilled' ? hourly.value : null;
     this.lastKey = '';
     this.onUpdate('weather');
   }
@@ -66,7 +64,6 @@ export class RiskEngine {
     return this.model !== null;
   }
 
-  // Rain intensity in inches per hour that drives the "right now" view.
   rainNow() {
     if (this.replayRain != null) return this.replayRain;
     const w = this.weather;
@@ -79,7 +76,6 @@ export class RiskEngine {
     this.lastKey = '';
   }
 
-  // points: [{ lat, lng, strength }]
   setObservations(points) {
     if (!this.grid) return;
     const cells = [];
@@ -109,7 +105,6 @@ export class RiskEngine {
     return this.liveNow;
   }
 
-  // Returns a new heatmap image only when something visible changed.
   render() {
     if (!this.model) return null;
     const factor = this.mode === 'heavy' ? 1 : this.nowFactor();
@@ -152,7 +147,6 @@ export class RiskEngine {
     return '';
   }
 
-  // Ranked places that most need a sensor, skipping areas existing sensors already cover.
   sites(existingSensors) {
     if (!this.model) return [];
     const mask = this.roadMask();
@@ -193,7 +187,6 @@ export class RiskEngine {
     };
   }
 
-  // One risk level for the whole area: the value 98% of road spots stay under.
   areaLevel() {
     const live = this.getLiveNow();
     if (!live) return null;

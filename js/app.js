@@ -2,7 +2,7 @@ import {
   SUPABASE_URL, SUPABASE_KEY, AREA_NAME, MAP_CENTER, MAP_ZOOM, HISTORY_MINUTES, LOW_BATTERY_PCT, REPLAY, RISK_BOUNDS,
 } from './config.js';
 import {
-  STATUS, REPORT_KINDS, statusLabel, waterCm, evaluate, summarize, cmToIn,
+  STATUS, REPORT_KINDS, statusLabel, waterCm, evaluate, summarize, cmToIn, replayRainfall,
   fmtIn, fmtCm, fmtRise, fmtEta, fmtAge, fmtClock, fmtTempF, escapeHtml,
 } from './logic.js';
 import { Simulator } from './sim.js';
@@ -12,6 +12,7 @@ import { RiskEngine } from './insight.js';
 import { femaZoneAt, describeZone } from './sources.js';
 import { icon } from './icons.js';
 import { welcomeHtml } from './welcome.js';
+import { loadForecastModel, forecastSensor, rainFromHourly, rainFromCurve } from './forecast.js';
 
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const panel = document.getElementById('panel');
@@ -39,6 +40,10 @@ const state = {
   point: null,
   sites: [],
   femaCache: new Map(),
+  model: null,
+  forecasts: new Map(),
+  forecastWarned: new Set(),
+  iceWarned: new Set(),
   chart: null,
   chartFor: null,
   channel: null,
@@ -56,11 +61,9 @@ function saveMuted() {
   try {
     localStorage.setItem('floodmesh-muted', JSON.stringify([...state.muted]));
   } catch {
-    /* storage unavailable, keep in memory */
   }
 }
 
-// Read a form field by name without relying on legacy named-property access.
 const field = (form, name) => {
   const el = form.querySelector(`[name="${name}"]:checked`) || form.querySelector(`[name="${name}"]`);
   return el ? el.value : '';
@@ -79,8 +82,6 @@ const latestRealOf = (id) => {
   }
   return null;
 };
-
-// Map and simulator ------------------------------------------------------
 
 const map = new MapView('map', {
   center: MAP_CENTER,
@@ -118,8 +119,6 @@ const sim = new Simulator({
   emit: (reading) => addReading(reading),
   onChange: (kind) => onReplayChange(kind),
 });
-
-// Data -------------------------------------------------------------------
 
 function addReading(r) {
   if (r.id != null && state.seen.has(r.id)) return;
@@ -166,8 +165,6 @@ async function loadReadings(ids) {
   if (error) console.error('Loading readings failed', error);
   (data || []).forEach(addReading);
 
-  // Sensors that have been quiet for over an hour still need their last reading,
-  // so they can show as offline with a "last seen" time.
   for (const id of ids) {
     if (latestOf(id)) continue;
     const { data: last } = await db
@@ -210,7 +207,7 @@ function addReport(r) {
   if (state.ready && !state.reportPending && !state.myReports.has(r.id)) {
     notify({
       title: 'New flooding report nearby',
-      body: `${REPORT_KINDS[r.kind] || 'Hazard'} reported by a resident.${r.note ? ` "${r.note}"` : ''}`,
+      body: `A resident reported a ${(REPORT_KINDS[r.kind] || 'hazard').toLowerCase()} nearby${r.note ? `: "${r.note}"` : '.'}`,
       level: 'warning',
     });
   }
@@ -290,6 +287,7 @@ function onReplayChange(kind) {
   }
   const driven = state.sensors.filter((s) => s.mode === 'street' && (s.is_simulated || (kind === 'start' && sim.includeReal) || (kind === 'stop' && !s.is_simulated)));
   for (const s of driven) {
+    state.forecastWarned.delete(s.id);
     for (const r of state.readings.get(s.id) || []) state.seen.delete(r.id);
     state.readings.set(s.id, []);
     state.prevStatus.delete(s.id);
@@ -303,8 +301,6 @@ function onReplayChange(kind) {
   if (state.selectedId) renderPanel();
   refreshLive();
 }
-
-// Alerts -----------------------------------------------------------------
 
 function checkAlerts() {
   if (!state.ready) return;
@@ -322,12 +318,36 @@ function checkAlerts() {
         if (prev !== undefined) {
           notify({
             title: `${s.name} sensor battery low`,
-            body: `Battery at ${Math.round(ev.battery)}%. Plug it into any USB phone charger to keep it monitoring.`,
+            body: `The battery is down to ${Math.round(ev.battery)}%, so plug it into any USB phone charger to keep it monitoring.`,
             level: 'warning',
           });
         }
       } else if (ev.battery >= LOW_BATTERY_PCT + 5) {
         state.lowBattery.delete(s.id);
+      }
+    }
+
+    const fc = state.forecasts.get(s.id);
+    if (s.mode === 'street' && !state.muted.has(s.id) && prev !== undefined) {
+      if (fc && fc.crossMin != null && fc.crossMin <= 45 && ev.key !== 'flooding' && !state.forecastWarned.has(s.id)) {
+        state.forecastWarned.add(s.id);
+        notify({
+          title: `Flooding expected at ${s.name}`,
+          body: `The forecast model expects the water to reach ${fmtIn(s.alert_depth_cm)} in about ${Math.max(1, Math.round(fc.crossMin))} minutes, so plan a different route if you can.`,
+          level: 'warning',
+        });
+      } else if (state.forecastWarned.has(s.id) && ev.water != null && ev.water < s.alert_depth_cm * 0.3 && (!fc || fc.crossMin == null)) {
+        state.forecastWarned.delete(s.id);
+      }
+      if (ev.ice && !state.iceWarned.has(s.id)) {
+        state.iceWarned.add(s.id);
+        notify({
+          title: `Ice possible at ${s.name}`,
+          body: `The air there is ${fmtTempF(ev.temp)} and there is still water on the road, so the surface could freeze.`,
+          level: 'warning',
+        });
+      } else if (!ev.ice) {
+        state.iceWarned.delete(s.id);
       }
     }
 
@@ -340,19 +360,19 @@ function checkAlerts() {
         if (ev.key === 'warning' && prevRank < 2) {
           notify({
             title: `Water rising at ${s.name}`,
-            body: `${fmtIn(ev.water)} on the road now. Expected to become impassable in ${fmtEta(ev.etaMin) || 'the next half hour'}.`,
+            body: `There is ${fmtIn(ev.water)} of water on the road now, and at this rate it could become impassable in ${fmtEta(ev.etaMin) || 'the next half hour'}.`,
             level: 'warning',
           });
         } else if (ev.key === 'flooding') {
           notify({
             title: `Flooding at ${s.name}`,
-            body: `${fmtIn(ev.water)} of water above the road surface. Use another route.`,
+            body: `The sensor reads ${fmtIn(ev.water)} of water above the road surface, so it's best to take another route for now.`,
             level: 'danger',
           });
         } else if (prev === 'flooding' && rank >= 0) {
           notify({
             title: `Water dropping at ${s.name}`,
-            body: `Level is back below ${fmtIn(s.alert_depth_cm)}. Watch for debris on the road.`,
+            body: `The water has dropped back below ${fmtIn(s.alert_depth_cm)}, though there may still be debris on the road.`,
             level: 'info',
           });
         }
@@ -360,7 +380,7 @@ function checkAlerts() {
       if (isOfficial() && ev.key === 'offline') {
         notify({
           title: `${s.name} stopped reporting`,
-          body: `No reading for ${fmtAge(ev.ageSec).replace(' ago', '')}. Check power and Wi-Fi at the site.`,
+          body: `It hasn't sent a reading in ${fmtAge(ev.ageSec).replace(' ago', '')}, so it's worth checking the power and Wi-Fi at the site.`,
           level: 'warning',
         });
       }
@@ -368,13 +388,13 @@ function checkAlerts() {
       if (ev.key === 'flooding') {
         notify({
           title: `Water detected: ${s.name}`,
-          body: `${fmtIn(ev.water)} of standing water under the sensor. Check for a leak or burst pipe.`,
+          body: `The sensor is picking up ${fmtIn(ev.water)} of standing water, which could mean a leak or a burst pipe nearby.`,
           level: 'danger',
         });
       } else if (ev.key === 'offline') {
         notify({
           title: `${s.name} sensor is offline`,
-          body: 'Check that it has power and is within range of your Wi-Fi.',
+          body: 'It hasn\'t checked in recently, so make sure it has power and is within range of your Wi-Fi.',
           level: 'warning',
         });
       } else if (prev === 'flooding') {
@@ -383,8 +403,6 @@ function checkAlerts() {
     }
   }
 }
-
-// Rendering --------------------------------------------------------------
 
 function renderAll() {
   renderTopbar();
@@ -422,6 +440,9 @@ function renderPanel() {
   };
   panel.innerHTML = (views[state.view] || publicListView)();
   panel.scrollTop = 0;
+  panel.classList.remove('enter');
+  void panel.offsetWidth;
+  panel.classList.add('enter');
   const sensor = state.selectedId && sensorById(state.selectedId);
   if (sensor && panel.querySelector('#chart')) mountChart(sensor);
 }
@@ -433,7 +454,7 @@ function publicListView() {
       <p class="muted">${escapeHtml(AREA_NAME)}</p>
     </header>
     <div data-live="area"></div>
-    <p class="hint">${icon('target')}<span>Click anywhere on the map to see the flood risk at that spot and why.</span></p>
+    <p class="hint">${icon('target')}<span>Click anywhere on the map to see the flood risk at that spot and what's behind it.</span></p>
     <section class="section tight">
       <div class="section-head"><h2>Street sensors</h2></div>
       <p class="summary" data-live="summary"></p>
@@ -448,7 +469,7 @@ function publicListView() {
     </section>
     <section class="section">
       <div class="section-head"><h2>Where sensors are needed next</h2></div>
-      <p class="muted small">Low spots on roads with no sensor nearby, ranked by how easily water collects there.</p>
+      <p class="muted small">These are low spots on local roads that don't have a sensor nearby yet, ranked by how easily water collects there.</p>
       <div data-live="sites"></div>
     </section>
     ${footer()}`;
@@ -456,8 +477,8 @@ function publicListView() {
 
 function footer(kind = 'street') {
   const note = kind === 'home'
-    ? 'Home alerts are informational and do not replace a monitored alarm or a plumber.'
-    : 'FloodMesh readings are informational. They do not replace warnings from Edison Township, Middlesex County, or the National Weather Service.';
+    ? 'Home alerts are meant as an early heads-up and don\'t replace a monitored alarm system or a plumber\'s inspection.'
+    : 'FloodMesh readings are meant to help you plan and don\'t replace official warnings from Edison Township, Middlesex County, or the National Weather Service.';
   return `
     <footer class="panel-foot">
       <p>${note}</p>
@@ -477,11 +498,12 @@ function streetDetailView() {
     <div data-live="stats"></div>
     <div class="chart-wrap"><canvas id="chart" aria-label="Water level over the last hour"></canvas></div>
     <div data-live="detail-actions"></div>
+    <div data-live="model-info"></div>
     <section class="section">
       <h2>Why this spot floods</h2>
       <div data-live="site-profile"></div>
     </section>
-    <p class="fine">${s.is_simulated ? 'Simulated sensor used to demonstrate the network. ' : ''}Depth is measured from the road surface directly below the sensor. Roads are marked impassable at ${fmtIn(s.alert_depth_cm)}, the depth at which moving water can stall most cars.</p>
+    <p class="fine">${s.is_simulated ? 'This is a simulated sensor that shows how the network behaves. ' : ''}Depth is measured from the road surface directly below the sensor, and the road counts as impassable at ${fmtIn(s.alert_depth_cm)} because moving water that deep can stall most cars.</p>
     ${footer()}`;
 }
 
@@ -493,7 +515,7 @@ function reportView() {
     <button class="back" data-action="back">Cancel</button>
     <header class="detail-head">
       <h1>Report flooding</h1>
-      <p class="muted">Drag the pin on the map to where you saw the problem. Reports stay on the map for four hours and are labeled as unverified.</p>
+      <p class="muted">Drag the pin to where you saw the problem. Your report stays on the map for four hours and is marked as unverified so people know it came from a resident.</p>
     </header>
     <form data-form="report" class="form">
       <fieldset>
@@ -514,8 +536,8 @@ function authView() {
     <header class="detail-head">
       <h1>${signin ? 'Sign in' : 'Create an account'}</h1>
       <p class="muted">${signin
-        ? 'Residents sign in to monitor sensors in their home. Municipal staff accounts can install street sensors once FloodMesh has verified them with the township.'
-        : 'Anyone can create a resident account and connect a home sensor. Street sensor access requires a verified municipal account.'}</p>
+        ? 'Residents sign in to keep track of the sensors in their homes, and municipal staff can install street sensors once their account has been verified with the township.'
+        : 'Anyone can create a resident account and connect a home sensor, while street sensors are limited to verified municipal accounts.'}</p>
     </header>
     <form data-form="auth" class="form">
       ${signin ? '' : '<label>Name<input name="name" required maxlength="60" autocomplete="name"></label>'}
@@ -548,7 +570,7 @@ function accountView() {
     </dl>
     <section class="section">
       <h2>Alerts</h2>
-      <p>Alerts appear inside FloodMesh while it is open. Background push notifications are planned for the mobile release.</p>
+      <p>Alerts show up inside FloodMesh while it's open, and background push notifications are planned for the mobile version.</p>
       ${alerts === 'default' ? '<button class="btn btn-secondary" data-action="alerts-enable">Also show browser notifications</button>' : `<p class="muted">${alertLine}</p>`}
     </section>
     <section class="section">
@@ -562,7 +584,7 @@ function homeView() {
     return `
       <header class="detail-head">
         <h1>Home sensors</h1>
-        <p class="muted">A FloodMesh sensor placed in a basement or low room alerts your phone when standing water appears, so a burst pipe or seepage gets caught early. It runs on a rechargeable battery and keeps working through power outages.</p>
+        <p class="muted">A FloodMesh sensor in a basement or low room sends an alert to your phone as soon as standing water shows up, so a burst pipe or seepage gets caught early. It runs on a rechargeable battery and keeps working through power outages.</p>
       </header>
       <button class="btn" data-action="goto" data-view="auth">Sign in</button>
       <p class="switch">No account yet? <button class="link-btn" data-action="auth-create">Create one</button></p>`;
@@ -572,7 +594,7 @@ function homeView() {
   return `
     <header class="detail-head">
       <h1>Home sensors</h1>
-      <p class="muted">Only you can see these sensors. They never appear on the public map.</p>
+      <p class="muted">Only you can see these sensors, and they never show up on the public map.</p>
     </header>
     <div class="sensor-list" data-live="home-list"></div>
     <section class="section">
@@ -597,7 +619,7 @@ function homeDetailView(s) {
     <div data-live="stats"></div>
     <div class="chart-wrap"><canvas id="chart" aria-label="Water on the floor over time"></canvas></div>
     ${sensorSettings(s, 'floor')}
-    <p class="fine">${s.is_simulated ? 'Demo unit with simulated readings. ' : ''}The sensor recharges from any USB phone charger and keeps monitoring during a power outage.</p>
+    <p class="fine">${s.is_simulated ? 'This demo unit uses simulated readings. ' : ''}A real sensor recharges from any USB phone charger and keeps monitoring through a power outage.</p>
     ${footer('home')}`;
 }
 
@@ -618,7 +640,7 @@ function sensorSettings(s, surface) {
     </section>
     <section class="section">
       <h2>Device setup</h2>
-      <p>Each sensor has a private key that lets it send readings to this account.</p>
+      <p>Each sensor has a private key that lets it send readings to your account.</p>
       <button class="btn btn-secondary" data-action="show-key" data-id="${s.id}">Show device key</button>
       <div data-live="key"></div>
     </section>`;
@@ -656,12 +678,12 @@ function municipalView() {
     <div data-live="health"></div>
     <section class="section">
       <h2>Recommended sites</h2>
-      <p class="muted small">Ranked from elevation, drainage, and road data. Each site is at least 850 ft from an existing sensor.</p>
+      <p class="muted small">These are ranked using elevation, drainage, and road data, and each one is at least 850 ft from an existing sensor.</p>
       <div data-live="sites"></div>
     </section>
     <section class="section">
       <h2>Install a sensor somewhere else</h2>
-      <p>Choose any location on the map, enter the mounting details, and the sensor gets a device key for its firmware.</p>
+      <p>You can also pick any spot on the map, enter the mounting details, and get a device key for the sensor's firmware.</p>
       <button class="btn btn-secondary" data-action="install-start">Place a new sensor</button>
     </section>`;
 }
@@ -671,7 +693,7 @@ function installView() {
     <button class="back" data-action="back">Cancel</button>
     <header class="detail-head">
       <h1>Place a new sensor</h1>
-      <p class="muted">Click the map where the sensor will be mounted. You can drag the pin to adjust it.</p>
+      <p class="muted">Click the map where the sensor will be mounted, then drag the pin if you need to adjust it.</p>
     </header>
     <p class="install-point" data-live="install-point"></p>
     <form data-form="install" class="form">
@@ -688,12 +710,9 @@ function installView() {
     <div data-live="message"></div>`;
 }
 
-
-// Risk, weather, points, and sites ------------------------------------------
-
 function onRiskUpdate(kind) {
   if (kind === 'terrain' || kind === 'roads') updateSites();
-  if (kind === 'terrain' && risk.terrainStatus === 'failed') map.setRiskStatus('Elevation data could not load. Showing sensors and reports only.');
+  if (kind === 'terrain' && risk.terrainStatus === 'failed') map.setRiskStatus('The elevation data couldn\'t load, so the map is showing sensors and reports only.');
   if (kind === 'terrain' && risk.ready) map.setRiskStatus('');
   refreshLive();
 }
@@ -731,14 +750,14 @@ function distanceFt(a, b) {
 }
 
 function rainLine() {
-  if (sim.running) return `Storm replay: ${sim.rainfall().toFixed(1)} in of rain per hour.`;
+  if (sim.running) return `The replay storm is dropping ${sim.rainfall().toFixed(1)} in of rain per hour.`;
   const w = risk.weather;
   if (!w) return 'Loading the National Weather Service forecast...';
-  if (w.error) return 'Weather forecast unavailable right now.';
+  if (w.error) return 'The weather forecast isn\'t available right now.';
   const parts = [];
   if (w.summary) parts.push(`${w.summary}${w.tempF != null ? `, ${w.tempF}°F` : ''}.`);
-  if (w.rainChance != null) parts.push(`${w.rainChance}% chance of rain in the next 6 hours.`);
-  if (w.rain24In != null) parts.push(`${w.rain24In < 0.05 ? 'Under 0.1' : w.rain24In.toFixed(1)} in expected over 24 hours.`);
+  if (w.rainChance != null && w.rain24In != null) parts.push(`There's a ${w.rainChance}% chance of rain in the next 6 hours, with ${w.rain24In < 0.05 ? 'under 0.1' : w.rain24In.toFixed(1)} in expected over the next day.`);
+  else if (w.rainChance != null) parts.push(`There's a ${w.rainChance}% chance of rain in the next 6 hours.`);
   return parts.join(' ');
 }
 
@@ -761,12 +780,12 @@ function areaHtml() {
   const flooding = state.sensors.filter((s) => s.mode === 'street' && state.evals.get(s.id)?.key === 'flooding').map((s) => s.name);
   const w = risk.weather;
   let reason;
-  if (flooding.length) reason = `Sensors report water over the road at ${flooding.join(' and ')}.`;
-  else if (sim.running) reason = 'Heavy rain in the replay. Low spots like the bottom of the Mt. Pleasant Ave hill fill first.';
-  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.5) reason = 'Steady rain in the forecast. Low spots may start to collect water.';
-  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.05) reason = 'Light rain in the forecast. Street flooding is unlikely.';
-  else if (w && !w.error) reason = 'No meaningful rain in the forecast, and no sensor shows water on the road.';
-  else reason = 'Based on sensor readings and terrain.';
+  if (flooding.length) reason = `Sensors are picking up water over the road at ${flooding.join(' and ')}.`;
+  else if (sim.running) reason = 'The replay storm is dropping heavy rain, and low spots like the bottom of the Mt. Pleasant Ave hill fill up first.';
+  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.5) reason = 'Steady rain is in the forecast, so low spots may start collecting water over the next day.';
+  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.05) reason = 'A little rain is in the forecast, but it isn\'t enough to flood the streets.';
+  else if (w && !w.error) reason = 'There\'s no meaningful rain in the forecast, and none of the sensors are picking up water on the road.';
+  else reason = 'This is based on the sensor readings and the terrain, since the forecast isn\'t available.';
   const alerts = w && !w.error && w.alerts.length
     ? `<div class="nws-alert">${icon('info')}<div><strong>${escapeHtml(w.alerts.map((a) => a.event).join(', '))}</strong><span>Issued by the National Weather Service for this area.</span></div></div>`
     : '';
@@ -812,7 +831,7 @@ function factorRows(lat, lng, info, { skipSensorId = null } = {}) {
     add('mountain', `Elevation ${Math.round(info.elevFt)} ft`, `${rel(info.localFt, info.localRadiusFt)}, and ${rel(info.broadFt, info.broadRadiusFt)}.`);
     add('wave', 'Drainage', info.acres >= 0.5
       ? `Runoff from about ${info.acres >= 10 ? Math.round(info.acres) : info.acres.toFixed(1)} acres of surrounding land flows through this spot.`
-      : 'Very little runoff flows here. Water tends to drain away from this spot.');
+      : 'Very little runoff flows here, since water tends to drain away from this spot.');
     add('drain', 'Ponding', info.pondFt >= 0.3
       ? `Sits in a dip that could hold about ${info.pondFt.toFixed(1)} ft of standing water if storm drains back up.`
       : 'Not in a closed dip, so water has a way to drain off.');
@@ -875,9 +894,9 @@ function pointHtml() {
   const info = risk.analyze(lat, lng);
   let head = '';
   if (!risk.ready) {
-    head = `<p class="muted">${risk.terrainStatus === 'failed' ? 'Elevation data is unavailable, so only nearby readings are shown.' : 'Loading elevation data...'}</p>`;
+    head = `<p class="muted">${risk.terrainStatus === 'failed' ? 'The elevation data couldn\'t load, so only nearby readings are shown.' : 'Loading elevation data...'}</p>`;
   } else if (info.outside) {
-    head = '<p class="muted">This spot is outside the area FloodMesh has analyzed. Terrain risk covers about a mile around the pilot sensors.</p>';
+    head = '<p class="muted">This spot is outside the area FloodMesh has analyzed, which covers about a mile around the pilot sensors.</p>';
   } else {
     const rankText = rankSentence(info);
     head = `
@@ -888,7 +907,7 @@ function pointHtml() {
       <p class="rank-line">${rankText}</p>`;
   }
   return `${head}<h2 class="factor-head">What goes into this</h2>${factorRows(lat, lng, info && !info.outside ? info : null)}
-    <p class="fine">Terrain analysis uses USGS 3DEP elevation at about 50 ft resolution. It estimates where water collects; it is not an official flood determination.</p>`;
+    <p class="fine">The terrain analysis uses USGS 3DEP elevation at about 50 ft resolution to estimate where water collects, so treat it as a guide rather than an official flood determination.</p>`;
 }
 
 function topShare(rank) {
@@ -903,6 +922,22 @@ function rankSentence(info) {
   return `Less flood-prone than ${Math.round((1 - info.rank) * 100)}% of ${where} in the analyzed area.`;
 }
 
+function modelInfoHtml() {
+  const m = state.model;
+  if (!m) return '';
+  const years = m.years[1] - m.years[0] + 1;
+  const imp = m.metrics.improvement_vs_trend_60;
+  const result = imp != null && imp > 0
+    ? `When tested on ${m.metrics.test_period}, a year it never saw during training, its one-hour predictions were ${Math.round(imp * 100)}% closer to what actually happened than simply assuming the current trend would continue.`
+    : `When tested on ${m.metrics.test_period}, it did not beat the simpler approach of assuming the current trend continues, so treat its numbers as a rough guide.`;
+  return `
+    <section class="section model-card">
+      <h2>${icon('chart')}About the forecast</h2>
+      <p>The 30 and 60 minute forecasts come from a small neural network trained on ${years} years of 15-minute water level readings from the USGS gauge on ${escapeHtml(m.site.name)} (site ${escapeHtml(m.site.id)}), paired with hourly rainfall for the same spot. ${result}</p>
+      <p class="fine">There is no public record of street-level flooding to train on yet, so the model learned how a nearby stream responds to rain and applies that pattern to this sensor, scaled to its flooding line. It will be retrained on FloodMesh's own readings once the sensors have logged a season of storms.</p>
+    </section>`;
+}
+
 function siteProfileHtml(s) {
   if (s.lat == null) return '';
   const info = risk.analyze(s.lat, s.lng);
@@ -913,7 +948,7 @@ function siteProfileHtml(s) {
 }
 
 function sitesHtml() {
-  if (!risk.ready) return `<p class="muted">${risk.terrainStatus === 'failed' ? 'Site ranking needs elevation data, which could not load.' : 'Ranking locations from elevation data...'}</p>`;
+  if (!risk.ready) return `<p class="muted">${risk.terrainStatus === 'failed' ? 'Ranking sites needs elevation data, which couldn\'t load.' : 'Ranking locations from elevation data...'}</p>`;
   if (!state.sites.length) return '<p class="muted">Every low spot in the analyzed area is already within range of a sensor.</p>';
   return `<ol class="site-list">${state.sites.map((site, k) => `
     <li>
@@ -929,8 +964,6 @@ function sitesHtml() {
     </li>`).join('')}</ol>`;
 }
 
-// Welcome --------------------------------------------------------------------
-
 function showWelcome(scrollToHow = false) {
   const el = document.getElementById('welcome');
   el.innerHTML = welcomeHtml();
@@ -939,6 +972,20 @@ function showWelcome(scrollToHow = false) {
   el.scrollTop = 0;
   const how = el.querySelector('#how-it-works');
   if (scrollToHow && how && how.scrollIntoView) how.scrollIntoView();
+  const items = el.querySelectorAll('.reveal');
+  if ('IntersectionObserver' in window) {
+    const seen = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          seen.unobserve(entry.target);
+        }
+      });
+    }, { root: el, threshold: 0.15 });
+    items.forEach((item) => seen.observe(item));
+  } else {
+    items.forEach((item) => item.classList.add('visible'));
+  }
 }
 
 function hideWelcome(go) {
@@ -948,7 +995,6 @@ function hideWelcome(go) {
   try {
     localStorage.setItem('floodmesh-welcomed', '1');
   } catch {
-    /* ignore */
   }
   if (go === 'auth') {
     state.authMode = 'signin';
@@ -961,11 +1007,32 @@ function hideWelcome(go) {
   map.resize();
 }
 
-// Live regions -----------------------------------------------------------
+function rainInputs(sensor) {
+  if (sim.drives(sensor)) return rainFromCurve(replayRainfall, sim.minute());
+  const hourly = rainFromHourly(risk.hourlyRain);
+  if (hourly) return hourly;
+  const w = risk.weather;
+  const next = w && !w.error && w.rain6In != null ? (w.rain6In / 6) * 25.4 : 0;
+  return { past1: 0, past3: 0, past6: 0, next1: next };
+}
+
+function updateForecasts() {
+  state.forecasts.clear();
+  if (!state.model) return;
+  for (const s of state.sensors) {
+    if (s.mode !== 'street') continue;
+    const ev = state.evals.get(s.id);
+    if (!ev || ev.key === 'offline' || ev.key === 'nodata') continue;
+    const list = state.readings.get(s.id) || [];
+    const fc = forecastSensor(state.model, s, list.slice(-400), rainInputs(s));
+    if (fc) state.forecasts.set(s.id, fc);
+  }
+}
 
 function refreshLive() {
   const now = Date.now();
   state.evals = new Map(state.sensors.map((s) => [s.id, evaluate(s, latestOf(s.id), now)]));
+  updateForecasts();
   map.setSensors(state.sensors.filter((s) => s.mode === 'street'), state.evals, state.selectedId);
   map.setReports(activeReports());
   risk.replayRain = sim.running ? sim.rainfall() : null;
@@ -981,8 +1048,17 @@ function live(name) {
   return panel.querySelector(`[data-live="${name}"]`);
 }
 
+function evalOf(s) {
+  let ev = state.evals.get(s.id);
+  if (!ev) {
+    ev = evaluate(s, latestOf(s.id), Date.now());
+    state.evals.set(s.id, ev);
+  }
+  return ev;
+}
+
 function fillLive() {
-  const items = state.sensors.map((s) => ({ sensor: s, ev: state.evals.get(s.id) }));
+  const items = state.sensors.map((s) => ({ sensor: s, ev: evalOf(s) }));
   const street = items.filter((i) => i.sensor.mode === 'street');
 
   const summary = live('summary');
@@ -1009,13 +1085,13 @@ function fillLive() {
             <span class="report-kind">${escapeHtml(REPORT_KINDS[r.kind] || 'Report')}</span>
             <span class="report-meta">${fmtAge((Date.now() - Date.parse(r.created_at)) / 1000)}${r.note ? `, "${escapeHtml(r.note)}"` : ''}</span>
           </button>`).join('')
-      : '<p class="muted">No active reports. If you see water on a road, report it so drivers can avoid it.</p>';
+      : '<p class="muted">There aren\'t any active reports right now. If you see water on a road, report it so other drivers can steer clear.</p>';
   }
 
   const home = live('home-list');
   if (home) {
     const mine = items.filter((i) => i.sensor.mode === 'personal' && i.sensor.owner_id === userId());
-    home.innerHTML = mine.map(sensorRow).join('') || '<p class="muted">No home sensors yet. Add one below.</p>';
+    home.innerHTML = mine.map(sensorRow).join('') || '<p class="muted">You haven\'t added a home sensor yet, but you can add one below.</p>';
   }
 
   const health = live('health');
@@ -1023,10 +1099,13 @@ function fillLive() {
 
   const s = state.selectedId && sensorById(state.selectedId);
   const stats = live('stats');
-  if (s && stats) stats.innerHTML = statsHtml(s, state.evals.get(s.id));
+  if (s && stats) stats.innerHTML = statsHtml(s, evalOf(s));
 
   const profile = live('site-profile');
   if (s && profile) profile.innerHTML = siteProfileHtml(s);
+
+  const modelInfo = live('model-info');
+  if (s && modelInfo) modelInfo.innerHTML = modelInfoHtml();
 
   const actions = live('detail-actions');
   if (s && actions) {
@@ -1071,6 +1150,11 @@ function readout(label, value, sub = '') {
   return `<div class="readout"><span class="readout-label">${label}</span><span class="readout-value">${value}</span>${sub ? `<span class="readout-sub">${sub}</span>` : ''}</div>`;
 }
 
+function trendWord(delta) {
+  if (Math.abs(delta) < 0.25) return 'about the same';
+  return delta > 0 ? `up ${fmtIn(delta)}` : `down ${fmtIn(-delta)}`;
+}
+
 function statsHtml(s, ev) {
   const color = STATUS[ev.key].color;
   const personal = s.mode === 'personal';
@@ -1078,7 +1162,15 @@ function statsHtml(s, ev) {
     readout(personal ? 'Water on floor' : 'Water above road', fmtIn(ev.water), fmtCm(ev.water)),
     readout('Trend', fmtRise(ev.rise)),
   ];
-  if (ev.etaMin != null && ev.key !== 'offline') rows.push(readout(personal ? 'Reaches alert level in' : 'Impassable in', fmtEta(ev.etaMin)));
+  const fc = state.forecasts.get(s.id);
+  if (fc) {
+    rows.push(readout('Forecast in 30 min', fmtIn(fc.depth30), trendWord(fc.depth30 - fc.current)));
+    rows.push(readout('Forecast in 60 min', fmtIn(fc.depth60), trendWord(fc.depth60 - fc.current)));
+    if (fc.crossMin != null && ev.key !== 'flooding') rows.push(readout('Impassable in', fmtEta(fc.crossMin), 'from the forecast model'));
+  } else if (ev.etaMin != null && ev.key !== 'offline') {
+    rows.push(readout(personal ? 'Reaches alert level in' : 'Impassable in', fmtEta(ev.etaMin)));
+  }
+  if (ev.ice) rows.push(readout('Ice risk', 'Likely', 'Freezing air with water on the road'));
   if (ev.temp != null) rows.push(readout('Air temperature', fmtTempF(ev.temp)));
   if (ev.battery != null) rows.push(readout('Battery', `${Math.round(ev.battery)}%`, ev.battery < LOW_BATTERY_PCT ? 'Recharge soon' : 'USB rechargeable'));
 
@@ -1118,19 +1210,23 @@ function renderReplayStatus() {
     <button class="link-btn" data-action="replay-stop">Stop</button>`;
 }
 
-// Chart ------------------------------------------------------------------
-
 function chartSeries(sensor) {
   const list = state.readings.get(sensor.id) || [];
   const cutoff = sensor.is_simulated || sim.drives(sensor) ? 0 : Date.now() - HISTORY_MINUTES * 60000;
   const points = list.filter((r) => Date.parse(r.created_at) >= cutoff);
   const step = Math.max(1, Math.ceil(points.length / 240));
   const sampled = points.filter((_, i) => i % step === 0 || i === points.length - 1);
-  return {
-    labels: sampled.map((r) => fmtClock(r.label_time || r.created_at)),
-    water: sampled.map((r) => Number(cmToIn(waterCm(sensor, r) ?? 0).toFixed(2))),
-    alert: Number(cmToIn(sensor.alert_depth_cm).toFixed(2)),
-  };
+  const labels = sampled.map((r) => fmtClock(r.label_time || r.created_at));
+  const water = sampled.map((r) => Number(cmToIn(waterCm(sensor, r) ?? 0).toFixed(2)));
+  const forecast = water.map(() => null);
+  const fc = state.forecasts.get(sensor.id);
+  if (fc && water.length) {
+    forecast[forecast.length - 1] = water[water.length - 1];
+    labels.push(`${fmtClock(new Date(fc.at + 30 * 60000).toISOString())} (forecast)`, `${fmtClock(new Date(fc.at + 60 * 60000).toISOString())} (forecast)`);
+    water.push(null, null);
+    forecast.push(Number(cmToIn(fc.depth30).toFixed(2)), Number(cmToIn(fc.depth60).toFixed(2)));
+  }
+  return { labels, water, forecast, alert: Number(cmToIn(sensor.alert_depth_cm).toFixed(2)) };
 }
 
 function mountChart(sensor) {
@@ -1151,6 +1247,17 @@ function mountChart(sensor) {
           pointRadius: 0,
           borderWidth: 2,
           tension: 0.25,
+        },
+        {
+          label: 'Forecast (in)',
+          data: series.forecast,
+          borderColor: '#11a39a',
+          borderDash: [5, 4],
+          borderWidth: 2,
+          pointRadius: 3,
+          pointBackgroundColor: '#11a39a',
+          fill: false,
+          spanGaps: false,
         },
         {
           label: sensor.mode === 'personal' ? 'Alert level' : 'Impassable',
@@ -1183,7 +1290,8 @@ function updateChart(sensor) {
   const series = chartSeries(sensor);
   state.chart.data.labels = series.labels;
   state.chart.data.datasets[0].data = series.water;
-  state.chart.data.datasets[1].data = series.labels.map(() => series.alert);
+  state.chart.data.datasets[1].data = series.forecast;
+  state.chart.data.datasets[2].data = series.labels.map(() => series.alert);
   state.chart.options.scales.y.suggestedMax = series.alert * 1.3;
   state.chart.update('none');
 }
@@ -1194,8 +1302,6 @@ function destroyChart() {
   state.chartFor = null;
 }
 
-// Demo controls ----------------------------------------------------------
-
 function renderDemo() {
   const el = document.getElementById('demo');
   const home = state.sensors.find((s) => s.mode === 'personal' && s.is_simulated && s.owner_id === userId());
@@ -1204,7 +1310,7 @@ function renderDemo() {
       <h2>Demo controls</h2>
       <button class="link-btn" data-demo="close">Close</button>
     </div>
-    <p>Storm replay plays a three-hour storm at ${REPLAY.speed} times speed through the simulated street sensors.</p>
+    <p>Storm replay runs a three-hour storm at ${REPLAY.speed} times normal speed through the simulated street sensors.</p>
     <label class="check"><input type="checkbox" id="demo-include-real" ${sim.running ? 'disabled' : ''} ${sim.includeReal ? 'checked' : ''}> Also drive the Mt. Pleasant Ave sensor</label>
     <button class="btn" data-demo="${sim.running ? 'replay-stop' : 'replay-start'}">${sim.running ? 'Stop storm replay' : 'Start storm replay'}</button>
     <h3>Home sensor</h3>
@@ -1216,8 +1322,6 @@ function renderDemo() {
         </div>`
       : '<p class="muted">Sign in with the homeowner demo account to use these.</p>'}`;
 }
-
-// Actions ----------------------------------------------------------------
 
 function goTo(view, selectedId = null) {
   if ((state.view === 'report' || state.view === 'install' || state.view === 'point') && view !== state.view) {
@@ -1374,7 +1478,7 @@ async function submitAuth(form) {
     return;
   }
   if (!result.data.session) {
-    setMessage('Account created. Check your email to confirm it, then sign in.');
+    setMessage('Your account was created. Check your email to confirm it, and then sign in.');
     return;
   }
   state.session = result.data.session;
@@ -1385,7 +1489,7 @@ async function submitAuth(form) {
 async function submitReport(form) {
   const point = map.getPin();
   if (!point) {
-    setMessage('Place the pin on the map first.', true);
+    setMessage('Drop the pin on the map first so people know where the problem is.', true);
     return;
   }
   const note = field(form, 'note').trim();
@@ -1408,7 +1512,7 @@ async function submitReport(form) {
   addReport(data);
   map.clearPin();
   goTo('public');
-  notify({ title: 'Report received', body: 'Thanks. Your report is on the map and will expire in four hours.', level: 'info' });
+  notify({ title: 'Report received', body: 'Thanks for letting people know. Your report is on the map now and will expire in four hours.', level: 'info' });
 }
 
 async function submitPersonal(form) {
@@ -1437,7 +1541,7 @@ async function submitPersonal(form) {
 async function submitInstall(form) {
   const point = state.installPoint;
   if (!point) {
-    setMessage('Click the map to choose where the sensor goes.', true);
+    setMessage('Click the map first to choose where the sensor goes.', true);
     return;
   }
   setMessage('Creating...');
@@ -1477,7 +1581,7 @@ async function submitAlertDepth(form) {
   }
   const s = sensorById(id);
   if (s) s.alert_depth_cm = cm;
-  setMessage(`Saved. Alerts now trigger at ${fmtIn(cm)}.`);
+  setMessage(`Alerts will now go off at ${fmtIn(cm)}.`);
   refreshLive();
 }
 
@@ -1485,7 +1589,7 @@ async function calibrate(id) {
   const s = sensorById(id);
   const r = latestRealOf(id);
   if (!s || !r || Date.now() - Date.parse(r.created_at) > 60000) {
-    setMessage('Waiting for a fresh reading from the sensor. Make sure it is powered and online, then try again.', true);
+    setMessage('The sensor hasn\'t sent a fresh reading yet, so make sure it\'s powered and online and then try again.', true);
     return;
   }
   const mount = Number((r.distance_mm / 10).toFixed(1));
@@ -1496,7 +1600,7 @@ async function calibrate(id) {
   }
   s.mount_height_cm = mount;
   renderPanel();
-  setMessage(`Saved. The dry level is ${fmtIn(mount)} below the sensor.`);
+  setMessage(`The dry level is now set at ${fmtIn(mount)} below the sensor.`);
 }
 
 async function revealKey(id) {
@@ -1552,8 +1656,6 @@ function handleDemo(action) {
   }
 }
 
-// Events -----------------------------------------------------------------
-
 panel.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action]');
   if (!el || el.disabled) return;
@@ -1608,8 +1710,6 @@ document.addEventListener('keydown', (e) => {
   if (e.shiftKey && e.key.toLowerCase() === 'd') toggleDemo();
 });
 
-// Start ------------------------------------------------------------------
-
 async function start() {
   if (window.Chart) {
     window.Chart.defaults.font.family = "'Montserrat', system-ui, sans-serif";
@@ -1620,7 +1720,6 @@ async function start() {
   state.session = data.session;
   db.auth.onAuthStateChange((_event, session) => {
     state.session = session;
-    // Supabase recommends deferring async work out of this callback.
     setTimeout(() => onIdentityChange(), 0);
   });
   let welcomed = false;
@@ -1631,6 +1730,10 @@ async function start() {
   }
   if (!welcomed) showWelcome();
   risk.init();
+  loadForecastModel().then((model) => {
+    state.model = model;
+    if (model) refreshLive();
+  });
   await onIdentityChange(true);
   setInterval(refreshLive, 1000);
   setInterval(() => risk.refreshWeather(), 15 * 60000);

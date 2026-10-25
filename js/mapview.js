@@ -24,11 +24,11 @@ const PIN_ICON = L.divIcon({
   iconAnchor: [14, 39],
 });
 
-function gaugeIcon(color, fillPct, selected) {
+function gaugeIcon(color, fillPct, selected, key) {
   const size = selected ? 40 : 30;
   return L.divIcon({
     className: 'gauge-wrap',
-    html: `<div class="gauge${selected ? ' selected' : ''}" style="--c:${color};--fill:${fillPct}%"><span class="gauge-water"></span></div>`,
+    html: `<div class="gauge gauge-${key}${selected ? ' selected' : ''}" style="--c:${color};--fill:${fillPct}%"><span class="gauge-water"></span></div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
   });
@@ -86,8 +86,6 @@ export class MapView {
     this.addLayerControl();
     this.addLegend();
   }
-
-  // Controls -------------------------------------------------------------
 
   addLayerControl() {
     const ctl = L.control({ position: 'topright' });
@@ -197,8 +195,6 @@ export class MapView {
       : 'Current conditions: terrain scaled by the rain forecast, plus live sensor readings and reports.';
   }
 
-  // Risk heatmap ---------------------------------------------------------
-
   setRiskImage(dataUrl, bounds) {
     if (!this.riskOverlay) {
       this.riskOverlay = L.imageOverlay(dataUrl, bounds, { pane: 'risk', interactive: false, className: 'risk-overlay' });
@@ -214,8 +210,6 @@ export class MapView {
     note.hidden = !text;
   }
 
-  // Sensors --------------------------------------------------------------
-
   setSensors(sensors, evals, selectedId) {
     const keep = new Set();
     for (const s of sensors) {
@@ -226,10 +220,10 @@ export class MapView {
       const color = STATUS[key].color;
       const fill = ev && ev.water != null ? Math.round(Math.min(100, (ev.water / s.alert_depth_cm) * 100)) : 0;
       const selected = s.id === selectedId;
-      const iconKey = `${color}|${fill}|${selected}`;
+      const iconKey = `${key}|${fill}|${selected}`;
       let marker = this.sensorMarkers.get(s.id);
       if (!marker) {
-        marker = L.marker([s.lat, s.lng], { icon: gaugeIcon(color, fill, selected), riseOnHover: true, title: s.name }).addTo(this.map);
+        marker = L.marker([s.lat, s.lng], { icon: gaugeIcon(color, fill, selected, key), riseOnHover: true, title: s.name }).addTo(this.map);
         marker.on('click', (e) => {
           L.DomEvent.stopPropagation(e);
           this.onSelect(s.id);
@@ -237,7 +231,7 @@ export class MapView {
         this.sensorMarkers.set(s.id, marker);
         this.sensorIconKey.set(s.id, iconKey);
       } else if (this.sensorIconKey.get(s.id) !== iconKey) {
-        marker.setIcon(gaugeIcon(color, fill, selected));
+        marker.setIcon(gaugeIcon(color, fill, selected, key));
         this.sensorIconKey.set(s.id, iconKey);
       }
       marker.setLatLng([s.lat, s.lng]);
@@ -255,8 +249,6 @@ export class MapView {
       }
     }
   }
-
-  // Reports and sites ----------------------------------------------------
 
   setReports(reports) {
     const keep = new Set();
@@ -296,8 +288,6 @@ export class MapView {
       m.addTo(this.siteGroup);
     });
   }
-
-  // Pins -----------------------------------------------------------------
 
   setPin(latlng, draggable) {
     if (this.pin) {

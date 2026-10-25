@@ -3,8 +3,6 @@ import { replayLevel, replayRate, replayRainfall } from './logic.js';
 
 let counter = 0;
 
-// Drives every sensor marked is_simulated, plus the real street sensor during a
-// replay if the presenter chooses. Real readings from the database are untouched.
 export class Simulator {
   constructor({ getSensors, emit, onChange }) {
     this.getSensors = getSensors;
@@ -73,7 +71,6 @@ export class Simulator {
     this.primeIdle();
   }
 
-  // Give simulated sensors a reading right away so they never show "no data".
   primeIdle() {
     const now = Date.now();
     for (const s of this.getSensors()) {

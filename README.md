@@ -52,6 +52,22 @@ Elevation comes from AWS Terrain Tiles (USGS 3DEP, about 10 m source resolution)
 
 The terrain score is scaled by expected rainfall intensity from the NWS forecast (or the replay), and every sensor reading water or community report adds a hotspot around it. Recommended sensor sites are the highest-scoring road cells (roads from OpenStreetMap) that are at least 850 ft from an existing sensor and 720 ft from each other.
 
+### Water level forecast (`model/train_forecast.py`, `js/forecast.js`)
+
+A small neural network (two hidden layers, 32 and 16 units) predicts how much the water will rise or fall over the next 30 and 60 minutes. It is trained on several years of 15-minute gage height readings from a USGS stream gauge near Edison, paired with hourly rainfall from Open-Meteo. Inputs are the level changes over the last 15, 30, 60, and 120 minutes, how far the water already sits above its recent low, and rainfall over the past 1, 3, and 6 hours plus the next hour. Levels are scaled to each site so the same model can run on a stream gauge or a street sensor, where the scale is the flooding line.
+
+The model is tested on a year it never saw during training and compared against two simple baselines: assuming the current trend continues, and assuming no change. The trained weights are exported to `model/forecast.json` and run directly in the browser.
+
+To retrain:
+
+```
+cd model
+python3 -m venv fm-env
+source fm-env/bin/activate
+pip install numpy scikit-learn
+python3 train_forecast.py
+```
+
 Status rules (in `js/logic.js`):
 - **Flooding**: depth at or above the impassable threshold (6 in by default for streets)
 - **Warning**: projected to reach the threshold within 30 minutes, or depth above 60% of the threshold
@@ -69,6 +85,8 @@ Status rules (in `js/logic.js`):
 | 6 V 1 W solar panel | Outdoor charging |
 | 3.7 V 18650 Li-ion pack | Runs the sensor overnight and through outages |
 | 1 kΩ resistor | Protects the ESP32 transmit pin on the sensor line |
+
+The DS18B20 reports air temperature, which affects the speed of sound the ultrasonic sensor relies on, and powers the ice warning when water sits on the road below freezing.
 
 Wiring: sensor TX to GPIO 18, sensor RX through 1 kΩ to GPIO 17, DS18B20 data to GPIO 4, both sensors on 3V3 and GND.
 
@@ -92,6 +110,8 @@ supabase/seed.sql              Pilot sensors for the Mt. Pleasant Ave area
 
 - Elevation: USGS 3DEP via AWS Terrain Tiles
 - Weather and alerts: National Weather Service API
+- Hourly rainfall: Open-Meteo (CC BY 4.0)
+- Stream gauge history: U.S. Geological Survey
 - Flood zones: FEMA National Flood Hazard Layer
 - Roads and map tiles: © OpenStreetMap contributors
 - [Leaflet](https://leafletjs.com) for the map, [Chart.js](https://www.chartjs.org) for charts

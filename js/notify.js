@@ -12,7 +12,6 @@ function dismiss(el) {
   setTimeout(() => el.remove(), 250);
 }
 
-// level: info | warning | danger
 export function notify({ title, body, level = 'info' }) {
   const host = stack();
   if (!host) return;

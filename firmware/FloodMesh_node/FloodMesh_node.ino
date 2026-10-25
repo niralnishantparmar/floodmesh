@@ -1,11 +1,3 @@
-// FloodMesh sensor node
-// ESP32-S3 + A02YYUW ultrasonic (UART controlled) + DS18B20 temperature probe.
-// Filters the distance readings, works out how fast the water is rising, and sends
-// a reading to Supabase every 10 seconds.
-//
-// Arduino IDE: Board "ESP32S3 Dev Module", USB CDC On Boot "Disabled",
-// Flash Size "16MB (128Mb)", PSRAM "OPI PSRAM". Serial Monitor at 115200 baud.
-// No extra libraries needed.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -13,30 +5,24 @@
 #include <HTTPClient.h>
 #include "driver/gpio.h"
 
-// ---------------- Fill these in ----------------
 const char *WIFI_SSID     = "YOUR_WIFI_NAME";
 const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 const char *DEVICE_KEY    = "PASTE_DEVICE_KEY_HERE";
 
-// ---------------- Project settings ----------------
 const char *SUPABASE_URL = "https://nqwgfnpksaqsvyzitwax.supabase.co";
 const char *SUPABASE_KEY = "sb_publishable_eI3c2zcEgRGGSH2K75bmZw_GYwGLi2l";
-const uint32_t POST_EVERY_MS = 10000;  // how often to send a reading
-const int RISE_WINDOW_S = 60;          // rise rate is fitted over the last minute
+const uint32_t POST_EVERY_MS = 10000;
+const int RISE_WINDOW_S = 60;
 
-// Optional battery monitor: battery + -> 100k -> GPIO1 -> 100k -> GND.
-// Leave false until that divider is wired.
 const bool BATTERY_WIRED = false;
 const int BATTERY_PIN = 1;
 
-// ---------------- Pins (same as the hardware test) ----------------
 const gpio_num_t DS18B20_PIN = GPIO_NUM_4;
-const int ULTRA_RX_PIN = 18;  // ESP32 listens here   <- sensor TX wire
-const int ULTRA_TX_PIN = 17;  // ESP32 talks here     -> 1k resistor -> sensor RX wire
+const int ULTRA_RX_PIN = 18;
+const int ULTRA_TX_PIN = 17;
 
 HardwareSerial UltraSerial(1);
 
-// ---------------- DS18B20 (1-Wire, unchanged from the hardware test) ----------------
 static portMUX_TYPE owMux = portMUX_INITIALIZER_UNLOCKED;
 
 static inline void owLow()     { gpio_set_level(DS18B20_PIN, 0); }
@@ -130,7 +116,6 @@ void serviceTemperature() {
   }
 }
 
-// ---------------- Ultrasonic frames ----------------
 const int FRAME_BUF = 9;
 int frames[FRAME_BUF];
 int frameCount = 0;
@@ -141,7 +126,7 @@ uint8_t win[4] = {0, 0, 0, 0};
 uint32_t lastTriggerMs = 0;
 
 void onFrame(int mm) {
-  if (mm < 30 || mm > 4500) return;  // inside the blind zone or no echo
+  if (mm < 30 || mm > 4500) return;
   frames[frameIdx] = mm;
   frameIdx = (frameIdx + 1) % FRAME_BUF;
   if (frameCount < FRAME_BUF) frameCount++;
@@ -177,7 +162,6 @@ int medianOf(const int *values, int n) {
   return tmp[n / 2];
 }
 
-// ---------------- One-second history for filtering and rise rate ----------------
 const int HIST = 120;
 uint32_t histMs[HIST];
 int histMm[HIST];
@@ -189,14 +173,13 @@ void sampleOncePerSecond() {
   uint32_t now = millis();
   if (now - lastSampleMs < 1000) return;
   lastSampleMs = now;
-  if (frameCount < 3 || now - lastFrameMs > 2000) return;  // not enough fresh echoes
+  if (frameCount < 3 || now - lastFrameMs > 2000) return;
   histMs[histIdx] = now;
   histMm[histIdx] = medianOf(frames, frameCount);
   histIdx = (histIdx + 1) % HIST;
   if (histCount < HIST) histCount++;
 }
 
-// Median of the newest few one-second samples, or -1 if the sensor has gone quiet.
 int filteredDistance() {
   if (histCount == 0) return -1;
   int newest = (histIdx - 1 + HIST) % HIST;
@@ -207,9 +190,6 @@ int filteredDistance() {
   return medianOf(vals, n);
 }
 
-// Least-squares slope of distance over the last RISE_WINDOW_S seconds.
-// Distance shrinking means water rising, so the sign is flipped.
-// Returns cm per minute, or NAN without enough data.
 float riseRateCmPerMin() {
   if (histCount < 10) return NAN;
   int newest = (histIdx - 1 + HIST) % HIST;
@@ -228,10 +208,9 @@ float riseRateCmPerMin() {
   double denom = n * sxx - sx * sx;
   if (denom == 0) return NAN;
   double slopeMmPerS = (n * sxy - sx * sy) / denom;
-  return (float)(-slopeMmPerS * 6.0);  // mm/s * 60 s/min / 10 mm/cm
+  return (float)(-slopeMmPerS * 6.0);
 }
 
-// ---------------- Battery (optional) ----------------
 void readBattery(float &volts, float &pct) {
   volts = NAN;
   pct = NAN;
@@ -244,12 +223,11 @@ void readBattery(float &volts, float &pct) {
   if (pct > 100) pct = 100;
 }
 
-// ---------------- Wi-Fi and upload ----------------
 uint32_t lastWifiAttemptMs = 0;
 
 void startWifi() {
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);  // keeps current draw steady so the solar board's 5V output stays on
+  WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   lastWifiAttemptMs = millis();
 }
@@ -270,7 +248,7 @@ void numberOrNull(char *out, size_t size, float value, int decimals) {
 
 bool postReading(int distanceMm, float rise, float tempC, float batV, float batPct) {
   WiFiClientSecure client;
-  client.setInsecure();  // prototype: skips certificate checks. Pin the root CA for deployment.
+  client.setInsecure();
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/rest/v1/rpc/submit_reading";
   if (!http.begin(client, url)) {
@@ -305,7 +283,6 @@ bool postReading(int distanceMm, float rise, float tempC, float batV, float batP
   return false;
 }
 
-// ---------------- Main ----------------
 uint32_t lastPostMs = 0;
 
 void setup() {

@@ -1,6 +1,3 @@
-// Outside data: elevation (AWS Terrain Tiles / USGS 3DEP), weather (National Weather
-// Service), flood zones (FEMA NFHL), and roads (OpenStreetMap via Overpass).
-// Every loader fails softly: the app keeps working if one source is down.
 
 const TILE = 256;
 const EARTH_M = 40075016.686;
@@ -17,8 +14,6 @@ async function fetchWithTimeout(url, options = {}, ms = 12000) {
   }
 }
 
-// Web Mercator pixel math ------------------------------------------------
-
 const lngToPx = (lng, z) => ((lng + 180) / 360) * TILE * 2 ** z;
 const latToPx = (lat, z) => {
   const r = (lat * Math.PI) / 180;
@@ -30,7 +25,6 @@ const pxToLat = (py, z) => {
   return (Math.atan(Math.sinh(n)) * 180) / Math.PI;
 };
 
-// A grid of cells laid over the map in Web Mercator, so overlays line up exactly with Leaflet.
 export function makeGrid(bounds, zoom, factor) {
   const [[south, west], [north, east]] = bounds;
   const originPx = Math.floor(lngToPx(west, zoom));
@@ -56,8 +50,6 @@ export function makeGrid(bounds, zoom, factor) {
   };
 }
 
-// Elevation --------------------------------------------------------------
-
 const terrainUrl = (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
 
 function loadImage(url) {
@@ -70,7 +62,6 @@ function loadImage(url) {
   });
 }
 
-// Returns the grid plus elevation in meters for every cell.
 export async function loadTerrain(bounds, { zoom = 14, factor = 2 } = {}) {
   const grid = makeGrid(bounds, zoom, factor);
   const tx0 = Math.floor(grid.originPx / TILE);
@@ -90,7 +81,7 @@ export async function loadTerrain(bounds, { zoom = 14, factor = 2 } = {}) {
     }
   }
   await Promise.all(jobs);
-  const data = ctx.getImageData(0, 0, mw, mh).data;  // throws if the tiles were not CORS-enabled
+  const data = ctx.getImageData(0, 0, mw, mh).data;
   const offX = grid.originPx - tx0 * TILE;
   const offY = grid.originPy - ty0 * TILE;
   const elev = new Float32Array(grid.w * grid.h);
@@ -109,12 +100,9 @@ export async function loadTerrain(bounds, { zoom = 14, factor = 2 } = {}) {
   return { grid, elev };
 }
 
-// Weather ----------------------------------------------------------------
-
 const NWS = 'https://api.weather.gov';
 const nwsHeaders = { Accept: 'application/geo+json' };
 
-// Sum the forecast precipitation (mm) that falls within the next `hours`.
 export function sumPrecip(values, hours, now = Date.now()) {
   const end = now + hours * 3600e3;
   let mm = 0;
@@ -165,10 +153,15 @@ export async function loadWeather(lat, lng) {
   return out;
 }
 
-// FEMA flood zones -------------------------------------------------------
+export async function loadHourlyRain(lat, lng) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}`
+    + '&hourly=precipitation&past_days=1&forecast_days=1&timezone=GMT';
+  const json = await (await fetchWithTimeout(url, {}, 10000)).json();
+  return json.hourly.time.map((t, k) => ({ t: Date.parse(`${t}:00Z`), mm: json.hourly.precipitation[k] ?? 0 }));
+}
 
 const NFHL = 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer';
-const NFHL_ZONES = 28;  // "Flood Hazard Zones" layer
+const NFHL_ZONES = 28;
 
 export function femaTileLayer() {
   const Layer = L.TileLayer.extend({
@@ -205,8 +198,6 @@ export function describeZone(z) {
   return `Zone ${z.zone}`;
 }
 
-// Roads ------------------------------------------------------------------
-
 const ROAD_TYPES = 'motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|primary_link|secondary_link|tertiary_link';
 
 export async function loadRoads(bounds) {
@@ -223,7 +214,6 @@ export async function loadRoads(bounds) {
     .map((el) => ({ name: (el.tags && el.tags.name) || '', points: el.geometry.map((p) => [p.lat, p.lon]) }));
 }
 
-// Burn roads into the grid. Returns, per cell, the index of the road on it (or -1).
 export function rasterizeRoads(roads, grid) {
   const { w, h } = grid;
   const hit = new Int32Array(w * h).fill(-1);
@@ -251,7 +241,6 @@ export function rasterizeRoads(roads, grid) {
       prev = [i, j];
     }
   });
-  // Widen by one cell so a sensor on the curb still counts as on the road.
   const wide = Int32Array.from(hit);
   for (let y = 0; y < h; y += 1) {
     for (let x = 0; x < w; x += 1) {

@@ -1,9 +1,3 @@
--- FloodMesh database setup
--- Run once: Supabase dashboard > SQL Editor > New query > paste all of this > Run
-
-
--- Accounts --------------------------------------------------------------
-
 create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   display_name text,
@@ -16,9 +10,6 @@ alter table public.profiles enable row level security;
 create policy "read own profile"
   on public.profiles for select to authenticated
   using (id = auth.uid());
-
--- No update policy on purpose: nobody can promote themselves to official.
--- Officials are approved by an admin running the update in step 5 of the setup.
 
 create or replace function public.handle_new_user()
 returns trigger
@@ -48,11 +39,6 @@ as $$
   );
 $$;
 
-
--- Sensors ---------------------------------------------------------------
--- street   = installed by a verified official, shown on the public map
--- personal = bought by a resident for a basement etc., private to the owner
-
 create table public.sensors (
   id uuid primary key default gen_random_uuid(),
   mode text not null check (mode in ('street', 'personal')),
@@ -61,8 +47,8 @@ create table public.sensors (
   location_note text,
   lat double precision,
   lng double precision,
-  mount_height_cm real not null default 100,  -- sensor face to dry ground / floor
-  alert_depth_cm real not null default 5,     -- water depth that counts as flooding
+  mount_height_cm real not null default 100,
+  alert_depth_cm real not null default 5,
   is_simulated boolean not null default false,
   created_at timestamptz not null default now()
 );
@@ -94,11 +80,6 @@ create policy "owners remove their sensors"
   on public.sensors for delete to authenticated
   using (owner_id = auth.uid());
 
-
--- Device keys -----------------------------------------------------------
--- Kept in a separate table so the public map never exposes them.
--- Each physical sensor gets one; it goes into the firmware.
-
 create table public.sensor_keys (
   sensor_id uuid primary key references public.sensors(id) on delete cascade,
   device_key text not null unique default replace(gen_random_uuid()::text, '-', '')
@@ -128,9 +109,6 @@ create trigger on_sensor_created
   after insert on public.sensors
   for each row execute procedure public.create_sensor_key();
 
-
--- Readings --------------------------------------------------------------
-
 create table public.readings (
   id bigint generated always as identity primary key,
   sensor_id uuid not null references public.sensors(id) on delete cascade,
@@ -151,9 +129,6 @@ create policy "readings follow sensor visibility"
   on public.readings for select to anon, authenticated
   using (exists (select 1 from public.sensors s where s.id = sensor_id));
 
--- Devices don't write to the table directly. They call this function with their
--- device key, and the water depth is worked out here from the mount height, so a
--- sensor can be recalibrated from the app without reflashing it.
 create or replace function public.submit_reading(
   p_device_key text,
   p_distance_mm integer,
@@ -188,9 +163,6 @@ begin
 end;
 $$;
 
-
--- Community reports -----------------------------------------------------
-
 create table public.reports (
   id bigint generated always as identity primary key,
   created_at timestamptz not null default now(),
@@ -214,9 +186,6 @@ create policy "anyone can file a report"
     expires_at <= now() + interval '12 hours'
     and (reporter_id is null or reporter_id = auth.uid())
   );
-
-
--- Permissions and live updates ------------------------------------------
 
 grant usage on schema public to anon, authenticated;
 grant select on public.sensors, public.readings, public.reports to anon, authenticated;

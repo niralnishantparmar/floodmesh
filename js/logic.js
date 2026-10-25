@@ -29,8 +29,6 @@ export function statusLabel(sensor, key) {
   return sensor.mode === 'personal' ? PERSONAL_LABELS[key] : STATUS[key].label;
 }
 
-// Water depth in cm. Real readings carry the raw distance, so depth is recomputed
-// from the current mount height (this keeps old readings correct after recalibrating).
 export function waterCm(sensor, reading) {
   if (!reading) return null;
   if (reading.distance_mm != null && sensor.mount_height_cm != null) {
@@ -41,7 +39,7 @@ export function waterCm(sensor, reading) {
 
 export function evaluate(sensor, latest, nowMs) {
   if (!latest) {
-    return { key: 'nodata', water: null, rise: null, etaMin: null, ageSec: null, battery: null, temp: null };
+    return { key: 'nodata', water: null, rise: null, etaMin: null, ageSec: null, battery: null, temp: null, ice: false };
   }
   const ageSec = Math.max(0, (nowMs - Date.parse(latest.created_at)) / 1000);
   const water = waterCm(sensor, latest);
@@ -54,11 +52,11 @@ export function evaluate(sensor, latest, nowMs) {
   let key;
   if (ageSec > OFFLINE_AFTER_SEC) key = 'offline';
   else if (water != null && water >= alert) key = 'flooding';
-  // Deep water is a warning whether it is still rising or already falling.
   else if ((etaMin != null && etaMin <= WARNING_ETA_MIN) || (water != null && water >= alert * 0.6)) key = 'warning';
   else if (rise >= RISING_CM_PER_MIN) key = 'rising';
   else key = 'normal';
 
+  const temp = latest.temp_c ?? null;
   return {
     key,
     water,
@@ -66,33 +64,35 @@ export function evaluate(sensor, latest, nowMs) {
     etaMin,
     ageSec,
     battery: latest.battery_pct ?? null,
-    temp: latest.temp_c ?? null,
+    temp,
+    ice: key !== 'offline' && temp != null && temp <= 1 && water != null && water >= 0.5,
   };
 }
 
 export function summarize(items) {
   const street = items.filter((i) => i.sensor.mode === 'street');
-  if (!street.length) return 'No street sensors are installed in this area yet.';
+  if (!street.length) return 'No street sensors have been installed in this area yet.';
   const names = (key) => street.filter((i) => i.ev.key === key).map((i) => i.sensor.name);
-  const parts = [];
+  const clauses = [];
   const flooding = names('flooding');
   const warning = names('warning');
   const rising = names('rising');
   const offline = names('offline');
-  if (flooding.length) parts.push(`Flooding at ${joinNames(flooding)}.`);
-  if (warning.length) parts.push(`Water approaching road level at ${joinNames(warning)}.`);
-  if (rising.length) parts.push(`Water rising at ${joinNames(rising)}.`);
-  if (offline.length) parts.push(`${offline.length} not reporting.`);
-  const head = `${street.length} street sensor${street.length === 1 ? '' : 's'} in this area.`;
-  return parts.length ? `${head} ${parts.join(' ')}` : `${head} All are reading normal.`;
+  if (flooding.length) clauses.push(`water is over the road at ${joinNames(flooding)}`);
+  if (warning.length) clauses.push(`it's getting close to road level at ${joinNames(warning)}`);
+  if (rising.length) clauses.push(`it's rising at ${joinNames(rising)}`);
+  if (offline.length) clauses.push(`${offline.length === 1 ? 'one sensor isn\'t' : `${offline.length} sensors aren't`} reporting`);
+  if (!clauses.length) {
+    return street.length === 1 ? 'The street sensor in this area is reading normal.' : `All ${street.length} street sensors in this area are reading normal.`;
+  }
+  const sentence = joinNames(clauses);
+  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
 }
 
 function joinNames(list) {
   if (list.length <= 2) return list.join(' and ');
   return `${list.slice(0, -1).join(', ')}, and ${list[list.length - 1]}`;
 }
-
-// Formatting -------------------------------------------------------------
 
 export const cmToIn = (cm) => cm / 2.54;
 
@@ -141,9 +141,6 @@ export function escapeHtml(value) {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
-
-// Storm replay curves ----------------------------------------------------
-// Water depth follows a bell curve around the storm peak; the rate is its derivative.
 
 export function replayLevel(profile, minute) {
   return profile.peak * Math.exp(-0.5 * ((minute - profile.center) / profile.sd) ** 2);
