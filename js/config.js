@@ -3,6 +3,10 @@
 export const SUPABASE_URL = 'https://nqwgfnpksaqsvyzitwax.supabase.co';
 export const SUPABASE_KEY = 'sb_publishable_eI3c2zcEgRGGSH2K75bmZw_GYwGLi2l';
 
+// Optional. CARTO's light basemap needs a free key (carto.com/basemaps/apikey).
+// Leave blank to use OpenStreetMap's standard tiles, which need no key.
+export const CARTO_KEY = '';
+
 export const AREA_NAME = 'Mt. Pleasant Ave area, Edison, NJ';
 export const MAP_CENTER = [40.5784, -74.3657];
 export const MAP_ZOOM = 16;

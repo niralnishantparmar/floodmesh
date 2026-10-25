@@ -1,4 +1,5 @@
 import { STATUS, REPORT_KINDS, escapeHtml, fmtAge } from './logic.js';
+import { CARTO_KEY } from './config.js';
 
 const REPORT_ICON = L.divIcon({
   className: 'report-icon',
@@ -31,11 +32,19 @@ export class MapView {
     this.onSelect = onSelect;
     this.map = L.map(elementId, { zoomControl: false }).setView(center, zoom);
     L.control.zoom({ position: 'bottomright' }).addTo(this.map);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 20,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    }).addTo(this.map);
+    const osmCredit = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    if (CARTO_KEY) {
+      L.tileLayer(`https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${encodeURIComponent(CARTO_KEY)}`, {
+        maxZoom: 20,
+        attribution: `${osmCredit} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
+      }).addTo(this.map);
+    } else {
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        className: 'tiles-muted',
+        attribution: osmCredit,
+      }).addTo(this.map);
+    }
 
     this.sensorMarkers = new Map();
     this.reportMarkers = new Map();
