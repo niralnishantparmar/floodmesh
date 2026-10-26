@@ -6,6 +6,8 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include "driver/gpio.h"
+#include "esp_random.h"
+#include "portal.h"
 
 const char *SUPABASE_URL = "https://nqwgfnpksaqsvyzitwax.supabase.co";
 const char *SUPABASE_KEY = "sb_publishable_eI3c2zcEgRGGSH2K75bmZw_GYwGLi2l";
@@ -16,7 +18,7 @@ const uint32_t WIFI_GIVE_UP_MS = 120000;
 const int RISE_WINDOW_S = 60;
 const bool BATTERY_WIRED = false;
 const int BATTERY_PIN = 1;
-const int BOOT_PIN = 0;
+const int SETUP_BUTTON_PIN = 0;
 
 const gpio_num_t DS18B20_PIN = GPIO_NUM_4;
 const int ULTRA_RX_PIN = 18;
@@ -25,7 +27,7 @@ const int ULTRA_TX_PIN = 17;
 HardwareSerial UltraSerial(1);
 Preferences prefs;
 WebServer server(80);
-DNSServer dns;
+DNSServer dnsServer;
 
 String wifiSsid;
 String wifiPass;
@@ -93,7 +95,7 @@ uint8_t owReadByte() {
   return v;
 }
 
-uint8_t crc8(const uint8_t *data, int len) {
+uint8_t dsCrc8(const uint8_t *data, int len) {
   uint8_t crc = 0;
   for (int i = 0; i < len; i++) {
     uint8_t b = data[i];
@@ -130,7 +132,7 @@ void serviceTemperature() {
     uint8_t d[9];
     bool allZero = true;
     for (int i = 0; i < 9; i++) { d[i] = owReadByte(); if (d[i]) allZero = false; }
-    if (allZero || crc8(d, 8) != d[8]) { lastTempC = NAN; return; }
+    if (allZero || dsCrc8(d, 8) != d[8]) { lastTempC = NAN; return; }
     int16_t raw = (int16_t)(((uint16_t)d[1] << 8) | d[0]);
     float t = raw / 16.0f;
     lastTempC = (t == 85.0f) ? NAN : t;
@@ -376,43 +378,8 @@ void postReading(int distanceMm, float rise, float tempC, float batV, float batP
   }
 }
 
-const char PAGE_HEAD[] = R"HTML(<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FloodMesh sensor setup</title><style>
-body{font-family:-apple-system,system-ui,"Segoe UI",sans-serif;margin:0;background:#fbf6ea;color:#0f2740}
-header{background:#163e66;color:#fbf6ea;padding:16px 22px;display:flex;align-items:center;gap:10px;font:600 19px Georgia,serif}
-header svg{width:28px;height:28px}
-main{max-width:420px;margin:0 auto;padding:26px 22px 40px}
-h1{font-size:23px;line-height:1.25;margin:0 0 10px}
-p{line-height:1.55;color:#3e4a55;margin:0 0 12px}
-label{display:block;font-weight:600;font-size:14px;margin:20px 0 6px}
-select,input{width:100%;box-sizing:border-box;font-size:16px;padding:12px;border:1px solid #d8ccb2;border-radius:8px;background:#fff;color:#0f2740}
-button{margin-top:24px;width:100%;font-size:16px;font-weight:600;padding:14px;border:0;border-radius:10px;background:#2f7fc1;color:#fff}
-.code{font:600 36px ui-monospace,Menlo,monospace;letter-spacing:.1em;margin:14px 0 6px;padding:14px;text-align:center;background:#e3f1fb;border-radius:12px;color:#0f2740}
-.small{font-size:13px;color:#6a747d}
-a{color:#256aa3}
-</style></head><body><header><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="13" fill="#fbf6ea"/><path d="M3.1 17.5 C 7 14.8, 10.5 14.8, 14.3 17.5 S 21.7 20.2, 25.5 17.5 C 26.6 16.7, 27.8 16.6, 28.9 17.5 A13 13 0 0 1 3.1 17.5 Z" fill="#2f7fc1"/><circle cx="16" cy="16" r="13" fill="none" stroke="#0f2740" stroke-width="2.6"/></svg>FloodMesh</header><main>)HTML";
 
-const char PAGE_TAIL[] = "</main></body></html>";
 
-const char STATUS_SCRIPT[] = R"HTML(<script>
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-async function poll(){
-  try{
-    const j=await (await fetch('/status',{cache:'no-store'})).json();
-    const m=document.getElementById('msg');
-    if(j.state==='connected'){
-      m.innerHTML='<h1>'+(j.paired?'All set':'Connected to '+esc(j.ssid))+'</h1>'+
-        (j.paired?'<p>This sensor is paired with your FloodMesh account and is sending readings. You can close this page.</p>':
-        '<p>Open FloodMesh, choose <strong>Add a sensor</strong>, and enter this pairing code:</p><div class="code">'+esc(j.code)+'</div><p class="small">Keep this page open until the app says the sensor is paired.</p>');
-      if(j.paired)return;
-    }else if(j.state==='failed'){
-      m.innerHTML='<h1>That didn\'t work</h1><p>The sensor couldn\'t join '+esc(j.ssid)+'. Check the password, and make sure the network is 2.4 GHz, since the sensor can\'t see 5 GHz networks.</p><p><a href="/">Try again</a></p>';
-      return;
-    }
-  }catch(e){}
-  setTimeout(poll,2000);
-}
-poll();
-</script>)HTML";
 
 void sendPage(const String &body) {
   server.sendHeader("Cache-Control", "no-store");
@@ -438,8 +405,8 @@ void handleRoot() {
     "<p class=\"small\" style=\"margin-top:22px\">Pairing code for this sensor: <strong>";
   body += prettyCode();
   body += "</strong>. <a href=\"/rescan\">Scan for networks again</a></p>"
-    "<script>const s=document.getElementById('ssid'),o=document.getElementById('other'),l=document.getElementById('otherLabel');"
-    "function t(){const v=s.value==='__other';o.style.display=l.style.display=v?'block':'none';}s.onchange=t;t();</script>";
+    "";
+  body += FORM_SCRIPT;
   sendPage(body);
 }
 
@@ -497,7 +464,7 @@ void startSetup() {
   scanNetworks();
   String ap = String("FloodMesh-") + pairingCode.substring(0, 4);
   WiFi.softAP(ap.c_str());
-  dns.start(53, "*", WiFi.softAPIP());
+  dnsServer.start(53, "*", WiFi.softAPIP());
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.on("/status", HTTP_GET, handleStatus);
@@ -514,7 +481,7 @@ void startSetup() {
 
 void stopSetup() {
   server.stop();
-  dns.stop();
+  dnsServer.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   setupMode = false;
@@ -522,7 +489,7 @@ void stopSetup() {
 }
 
 void serviceSetup() {
-  dns.processNextRequest();
+  dnsServer.processNextRequest();
   server.handleClient();
   if (setupState == "connecting") {
     if (WiFi.status() == WL_CONNECTED) {
@@ -539,7 +506,7 @@ void serviceSetup() {
 }
 
 void serviceBootButton() {
-  if (digitalRead(BOOT_PIN) == LOW) {
+  if (digitalRead(SETUP_BUTTON_PIN) == LOW) {
     if (bootPressedMs == 0) bootPressedMs = millis();
     if (millis() - bootPressedMs > 3000) {
       Serial.println("Clearing Wi-Fi settings and restarting into setup.");
@@ -578,7 +545,7 @@ void setup() {
   Serial.println();
   Serial.printf("FloodMesh sensor, firmware %s\n", FIRMWARE);
 
-  pinMode(BOOT_PIN, INPUT_PULLUP);
+  pinMode(SETUP_BUTTON_PIN, INPUT_PULLUP);
   gpio_reset_pin(DS18B20_PIN);
   gpio_set_direction(DS18B20_PIN, GPIO_MODE_INPUT_OUTPUT_OD);
   gpio_set_pull_mode(DS18B20_PIN, GPIO_PULLUP_ONLY);
