@@ -1,77 +1,58 @@
 import { STATUS, REPORT_KINDS, escapeHtml, fmtAge, fmtIn } from './logic.js';
-import { CARTO_KEY } from './config.js';
+import { CARTO_KEY, COLORS } from './config.js';
 import { femaTileLayer } from './sources.js';
 
-const REPORT_SVG = `<svg viewBox="0 0 24 22" width="24" height="22" aria-hidden="true">
-    <path d="M12 1.5 23 20.5H1z" fill="#e08a00" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>
-    <path d="M12 8v6" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
-    <circle cx="12" cy="17.2" r="1.3" fill="#fff"/></svg>`;
+const REPORT_SVG = `<svg viewBox="0 0 20 18" width="20" height="18" aria-hidden="true">
+  <path d="M10 1.2 19 16.8H1z" fill="#c25e1a" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/>
+  <path d="M10 6.5v4.6" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="10" cy="13.7" r="1.05" fill="#fff"/></svg>`;
 
-const REPORT_ICON = L.divIcon({
-  className: 'report-icon',
-  html: REPORT_SVG,
-  iconSize: [24, 22],
-  iconAnchor: [12, 20],
-  popupAnchor: [0, -18],
-});
+const REPORT_ICON = L.divIcon({ className: 'report-icon', html: REPORT_SVG, iconSize: [20, 18], iconAnchor: [10, 16], popupAnchor: [0, -14] });
 
 const PIN_ICON = L.divIcon({
   className: 'pin-icon',
-  html: `<svg viewBox="0 0 28 40" width="28" height="40" aria-hidden="true">
-    <path d="M14 1C7 1 1.5 6.4 1.5 13.3 1.5 22.6 14 39 14 39s12.5-16.4 12.5-25.7C26.5 6.4 21 1 14 1z" fill="#0e2a3f" stroke="#fff" stroke-width="2"/>
-    <circle cx="14" cy="13.5" r="4.6" fill="#fff"/></svg>`,
-  iconSize: [28, 40],
-  iconAnchor: [14, 39],
+  html: `<svg viewBox="0 0 24 34" width="24" height="34" aria-hidden="true">
+    <path d="M12 1C6 1 1.5 5.6 1.5 11.4 1.5 19.3 12 33 12 33s10.5-13.7 10.5-21.6C22.5 5.6 18 1 12 1z" fill="#17212b" stroke="#fff" stroke-width="1.6"/>
+    <circle cx="12" cy="11.5" r="3.6" fill="#fff"/></svg>`,
+  iconSize: [24, 34],
+  iconAnchor: [12, 33],
 });
 
-function gaugeIcon(color, fillPct, selected, key) {
-  const size = selected ? 40 : 30;
+function gaugeIcon(key, fillPct, selected) {
+  const size = selected ? 34 : 26;
   return L.divIcon({
     className: 'gauge-wrap',
-    html: `<div class="gauge gauge-${key}${selected ? ' selected' : ''}" style="--c:${color};--fill:${fillPct}%"><span class="gauge-water"></span></div>`,
+    html: `<div class="gauge gauge-${key}${selected ? ' selected' : ''}" style="--c:${STATUS[key].color};--fill:${fillPct}%"><span></span></div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
   });
 }
 
 function siteIcon(rank) {
-  return L.divIcon({
-    className: 'site-wrap',
-    html: `<div class="site-marker"><span>${rank}</span></div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-  });
-}
-
-function reportPopup(r) {
-  const age = fmtAge((Date.now() - Date.parse(r.created_at)) / 1000);
-  const note = r.note ? `<p>${escapeHtml(r.note)}</p>` : '';
-  return `<div class="report-popup"><strong>${escapeHtml(REPORT_KINDS[r.kind] || 'Report')}</strong>${note}<span>Reported ${age}. Unverified community report.</span></div>`;
+  return L.divIcon({ className: 'site-wrap', html: `<div class="site-marker">${rank}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] });
 }
 
 export class MapView {
-  constructor(elementId, { center, zoom, onSelect, onMapClick, onSiteSelect, onRiskMode }) {
+  constructor(elementId, { center, zoom, onSelect, onMapClick, onSiteSelect, onRiskMode, onViewChange, popupContent }) {
     this.onSelect = onSelect;
     this.onSiteSelect = onSiteSelect;
     this.onRiskMode = onRiskMode;
-    this.map = L.map(elementId, { zoomControl: false }).setView(center, zoom);
+    this.popupContent = popupContent;
+    this.map = L.map(elementId, { zoomControl: false, attributionControl: true }).setView(center, zoom);
     L.control.zoom({ position: 'bottomright' }).addTo(this.map);
-
-    const osmCredit = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    const osm = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
     if (CARTO_KEY) {
       L.tileLayer(`https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${encodeURIComponent(CARTO_KEY)}`, {
         maxZoom: 20,
-        attribution: `${osmCredit} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
+        attribution: `${osm} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
       }).addTo(this.map);
     } else {
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, className: 'tiles-muted', attribution: osmCredit }).addTo(this.map);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, className: 'tiles-muted', attribution: osm }).addTo(this.map);
     }
-
-    this.map.createPane('fema');
-    this.map.getPane('fema').style.zIndex = 340;
-    this.map.createPane('risk');
-    this.map.getPane('risk').style.zIndex = 350;
-    this.map.getPane('risk').style.pointerEvents = 'none';
+    this.map.createPane('fema').style.zIndex = 340;
+    const riskPane = this.map.createPane('risk');
+    riskPane.style.zIndex = 350;
+    riskPane.style.pointerEvents = 'none';
 
     this.layers = { risk: true, fema: false, reports: true, sites: true };
     this.riskOverlay = null;
@@ -82,21 +63,55 @@ export class MapView {
     this.reportMarkers = new Map();
     this.siteGroup = L.layerGroup().addTo(this.map);
     this.pin = null;
+
     this.map.on('click', (e) => onMapClick && onMapClick(e.latlng));
+    this.map.on('moveend', () => onViewChange && onViewChange(this.view(), this.map.getZoom()));
+    this.addNotice();
     this.addLayerControl();
     this.addLegend();
+  }
+
+  view() {
+    const b = this.map.getBounds();
+    return { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
+  }
+
+  zoom() {
+    return this.map.getZoom();
+  }
+
+  contains(lat, lng) {
+    return this.map.getBounds().contains([lat, lng]);
+  }
+
+  addNotice() {
+    const ctl = L.control({ position: 'topleft' });
+    ctl.onAdd = () => {
+      const div = L.DomUtil.create('div', 'map-notice');
+      div.hidden = true;
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+    ctl.addTo(this.map);
+    this.notice = ctl.getContainer();
+  }
+
+  setNotice(text, action) {
+    this.notice.hidden = !text;
+    this.notice.innerHTML = text ? `<span>${escapeHtml(text)}</span>${action ? `<button type="button">${escapeHtml(action.label)}</button>` : ''}` : '';
+    if (action) this.notice.querySelector('button').onclick = action.run;
   }
 
   addLayerControl() {
     const ctl = L.control({ position: 'topright' });
     ctl.onAdd = () => {
-      const div = L.DomUtil.create('div', 'map-card layer-card');
+      const div = L.DomUtil.create('div', 'map-box layer-box');
       div.innerHTML = `
-        <h3>Map layers</h3>
+        <div class="box-title">Layers</div>
         <label><input type="checkbox" data-layer="risk" checked> Flood risk</label>
         <label><input type="checkbox" data-layer="fema"> FEMA flood zones</label>
-        <label><input type="checkbox" data-layer="reports" checked> Community reports</label>
-        <label><input type="checkbox" data-layer="sites" checked> Recommended sensor sites</label>`;
+        <label><input type="checkbox" data-layer="reports" checked> Reports</label>
+        <label><input type="checkbox" data-layer="sites" checked> Suggested sensor sites</label>`;
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
       div.addEventListener('change', (e) => {
@@ -106,64 +121,53 @@ export class MapView {
       return div;
     };
     ctl.addTo(this.map);
-    this.layerCard = ctl.getContainer();
+    this.layerBox = ctl.getContainer();
   }
 
   addLegend() {
     const ctl = L.control({ position: 'bottomleft' });
     ctl.onAdd = () => {
-      const div = L.DomUtil.create('div', 'map-card legend');
-      const statuses = ['normal', 'rising', 'warning', 'flooding', 'offline']
-        .map((k) => `<li><span class="dot" style="--c:${STATUS[k].color}"></span>${STATUS[k].label}</li>`).join('');
+      const div = L.DomUtil.create('div', 'map-box legend');
       div.innerHTML = `
-        <button class="legend-toggle" data-legend-toggle aria-expanded="true">Legend</button>
-        <div class="legend-body">
-          <div class="legend-block" data-risk-legend>
-            <h3>Flood risk</h3>
-            <div class="mode-switch" role="group" aria-label="Risk scenario">
-              <button data-mode="now">Right now</button>
-              <button data-mode="heavy" class="active">During heavy rain</button>
-            </div>
-            <p class="legend-caption" data-caption>Where water collects first in a heavy storm, from elevation and drainage.</p>
-            <div class="ramp"></div>
-            <div class="ramp-labels"><span>Low</span><span>Moderate</span><span>High</span><span>Severe</span></div>
-            <p class="legend-status" hidden></p>
+        <div class="legend-head">
+          <div class="mode" role="group" aria-label="Scenario">
+            <button type="button" data-mode="heavy" class="on">In a heavy storm</button>
+            <button type="button" data-mode="now">Right now</button>
           </div>
-          <div class="legend-block">
-            <h3>Sensors</h3>
-            <ul class="legend-list">${statuses}</ul>
-            <p class="legend-note">Blue fill shows how close the water is to the flooding line.</p>
-          </div>
-          <div class="legend-block legend-extra">
-            <div class="legend-row"><span class="legend-sym">${REPORT_SVG}</span>Community report</div>
-            <div class="legend-row"><span class="legend-sym"><span class="site-marker small"><span>1</span></span></span>Recommended sensor site</div>
-            <div class="legend-row fema-key" hidden><span class="legend-sym swatch"></span>FEMA flood zone</div>
-          </div>
+        </div>
+        <p class="legend-caption" data-caption>Shaded areas are where water collects first when it rains hard.</p>
+        <div class="ramp"></div>
+        <div class="ramp-labels"><span>Low</span><span>Moderate</span><span>High</span><span>Severe</span></div>
+        <div class="legend-keys">
+          <span><i class="key-dot" style="--c:${COLORS.low}"></i>Sensor, normal</span>
+          <span><i class="key-dot" style="--c:${COLORS.severe}"></i>Sensor, flooding</span>
+          <span><i class="key-tri">${REPORT_SVG}</i>Report</span>
+          <span><i class="key-site">1</i>Suggested site</span>
         </div>`;
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
       div.addEventListener('click', (e) => {
-        const mode = e.target.closest('[data-mode]');
-        if (mode) {
-          this.setRiskMode(mode.dataset.mode);
-          if (this.onRiskMode) this.onRiskMode(mode.dataset.mode);
-        }
-        const toggle = e.target.closest('[data-legend-toggle]');
-        if (toggle) {
-          const collapsed = div.classList.toggle('collapsed');
-          toggle.setAttribute('aria-expanded', String(!collapsed));
-        }
+        const btn = e.target.closest('[data-mode]');
+        if (!btn) return;
+        this.setRiskMode(btn.dataset.mode);
+        if (this.onRiskMode) this.onRiskMode(btn.dataset.mode);
       });
-      if (window.matchMedia && window.matchMedia('(max-width: 820px)').matches) div.classList.add('collapsed');
       return div;
     };
     ctl.addTo(this.map);
     this.legend = ctl.getContainer();
   }
 
+  setRiskMode(mode) {
+    this.legend.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+    this.legend.querySelector('[data-caption]').textContent = mode === 'heavy'
+      ? 'Shaded areas are where water collects first when it rains hard.'
+      : 'Shading reflects the current forecast plus live sensor readings and reports.';
+  }
+
   setLayer(name, on) {
     this.layers[name] = on;
-    const box = this.layerCard.querySelector(`[data-layer="${name}"]`);
+    const box = this.layerBox.querySelector(`[data-layer="${name}"]`);
     if (box) box.checked = on;
     if (name === 'risk' && this.riskOverlay) {
       if (on) this.riskOverlay.addTo(this.map); else this.riskOverlay.remove();
@@ -178,7 +182,6 @@ export class MapView {
       } else if (this.femaLayer) {
         this.femaLayer.remove();
       }
-      this.legend.querySelector('.fema-key').hidden = !on;
     }
     if (name === 'reports') {
       if (on) this.reportGroup.addTo(this.map); else this.reportGroup.remove();
@@ -188,26 +191,21 @@ export class MapView {
     }
   }
 
-  setRiskMode(mode) {
-    this.legend.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
-    this.legend.querySelector('[data-caption]').textContent = mode === 'heavy'
-      ? 'Where water collects first in a heavy storm, from elevation and drainage.'
-      : 'Current conditions: terrain scaled by the rain forecast, plus live sensor readings and reports.';
-  }
-
-  setRiskImage(dataUrl, bounds) {
-    if (!this.riskOverlay) {
-      this.riskOverlay = L.imageOverlay(dataUrl, bounds, { pane: 'risk', interactive: false, className: 'risk-overlay' });
-      if (this.layers.risk) this.riskOverlay.addTo(this.map);
-    } else {
-      this.riskOverlay.setUrl(dataUrl);
+  setRiskImage(url, bounds) {
+    if (!url) {
+      if (this.riskOverlay) {
+        this.riskOverlay.remove();
+        this.riskOverlay = null;
+      }
+      return;
     }
-  }
-
-  setRiskStatus(text) {
-    const note = this.legend.querySelector('.legend-status');
-    note.textContent = text || '';
-    note.hidden = !text;
+    if (this.riskOverlay) {
+      this.riskOverlay.setUrl(url);
+      this.riskOverlay.setBounds(L.latLngBounds(bounds));
+    } else {
+      this.riskOverlay = L.imageOverlay(url, bounds, { pane: 'risk', interactive: false, className: 'risk-overlay' });
+      if (this.layers.risk) this.riskOverlay.addTo(this.map);
+    }
   }
 
   setSensors(sensors, evals, selectedId) {
@@ -217,28 +215,25 @@ export class MapView {
       keep.add(s.id);
       const ev = evals.get(s.id);
       const key = ev ? ev.key : 'nodata';
-      const color = STATUS[key].color;
       const fill = ev && ev.water != null ? Math.round(Math.min(100, (ev.water / s.alert_depth_cm) * 100)) : 0;
       const selected = s.id === selectedId;
       const iconKey = `${key}|${fill}|${selected}`;
       let marker = this.sensorMarkers.get(s.id);
       if (!marker) {
-        marker = L.marker([s.lat, s.lng], { icon: gaugeIcon(color, fill, selected, key), riseOnHover: true, title: s.name }).addTo(this.map);
+        marker = L.marker([s.lat, s.lng], { icon: gaugeIcon(key, fill, selected), riseOnHover: true, title: s.name }).addTo(this.map);
         marker.on('click', (e) => {
           L.DomEvent.stopPropagation(e);
           this.onSelect(s.id);
         });
         this.sensorMarkers.set(s.id, marker);
-        this.sensorIconKey.set(s.id, iconKey);
       } else if (this.sensorIconKey.get(s.id) !== iconKey) {
-        marker.setIcon(gaugeIcon(color, fill, selected, key));
-        this.sensorIconKey.set(s.id, iconKey);
+        marker.setIcon(gaugeIcon(key, fill, selected));
       }
+      this.sensorIconKey.set(s.id, iconKey);
       marker.setLatLng([s.lat, s.lng]);
       marker.setZIndexOffset(selected ? 1000 : 0);
-      const depth = ev && ev.water != null ? `, ${fmtIn(ev.water)}` : '';
-      const tip = `${escapeHtml(s.name)}: ${STATUS[key].label}${depth}`;
-      if (!marker.getTooltip()) marker.bindTooltip(tip, { direction: 'top', offset: [0, -16] });
+      const tip = `${escapeHtml(s.name)}: ${STATUS[key].label}${ev && ev.water != null && key !== 'offline' ? `, ${fmtIn(ev.water)}` : ''}`;
+      if (!marker.getTooltip()) marker.bindTooltip(tip, { direction: 'top', offset: [0, -14] });
       else marker.setTooltipContent(tip);
     }
     for (const [id, marker] of this.sensorMarkers) {
@@ -256,7 +251,7 @@ export class MapView {
       keep.add(r.id);
       if (this.reportMarkers.has(r.id)) continue;
       const marker = L.marker([r.lat, r.lng], { icon: REPORT_ICON, keyboard: false }).addTo(this.reportGroup);
-      marker.bindPopup(() => reportPopup(r));
+      marker.bindPopup(() => this.popupContent(r), { className: 'report-popup', maxWidth: 260 });
       marker.on('click', (e) => L.DomEvent.stopPropagation(e));
       this.reportMarkers.set(r.id, marker);
     }
@@ -276,28 +271,31 @@ export class MapView {
     marker.openPopup();
   }
 
+  closePopups() {
+    this.map.closePopup();
+  }
+
   setSites(sites) {
     this.siteGroup.clearLayers();
     sites.forEach((site, k) => {
-      const m = L.marker([site.lat, site.lng], { icon: siteIcon(k + 1), keyboard: false, title: `Recommended site ${k + 1}` });
+      const m = L.marker([site.lat, site.lng], { icon: siteIcon(k + 1), keyboard: false, title: `Suggested site ${k + 1}` });
       m.on('click', (e) => {
         L.DomEvent.stopPropagation(e);
         if (this.onSiteSelect) this.onSiteSelect(k);
       });
-      m.bindTooltip(`Recommended site ${k + 1}${site.road ? `: ${escapeHtml(site.road)}` : ''}`, { direction: 'top', offset: [0, -14] });
       m.addTo(this.siteGroup);
     });
   }
 
-  setPin(latlng, draggable) {
-    if (this.pin) {
-      this.pin.setLatLng(latlng);
-      if (this.pin.dragging) {
-        if (draggable) this.pin.dragging.enable(); else this.pin.dragging.disable();
-      }
-    } else {
+  setPin(latlng, draggable, onDrag) {
+    if (!this.pin) {
       this.pin = L.marker(latlng, { icon: PIN_ICON, draggable, autoPan: true, zIndexOffset: 2000 }).addTo(this.map);
+    } else {
+      this.pin.setLatLng(latlng);
+      if (draggable) this.pin.dragging.enable(); else this.pin.dragging.disable();
     }
+    this.pin.off('dragend');
+    if (onDrag) this.pin.on('dragend', (e) => onDrag(e.target.getLatLng()));
     return this.pin;
   }
 
@@ -316,17 +314,25 @@ export class MapView {
     return this.map.getCenter();
   }
 
-  focus(latlng, zoom) {
-    if (zoom) this.map.setView(latlng, zoom);
-    else this.map.panTo(latlng);
+  goTo(latlng, zoom) {
+    this.map.setView(latlng, zoom ?? this.map.getZoom());
   }
 
-  fit(points) {
-    if (!points.length) return;
-    this.map.fitBounds(L.latLngBounds(points), { padding: [90, 90], maxZoom: 16 });
+  fitBounds(bounds, maxZoom = 16) {
+    this.map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40], maxZoom });
+  }
+
+  panTo(latlng) {
+    this.map.panTo(latlng);
   }
 
   resize() {
     this.map.invalidateSize();
   }
 }
+
+export function reportAge(r) {
+  return fmtAge((Date.now() - Date.parse(r.created_at)) / 1000);
+}
+
+export { REPORT_KINDS };

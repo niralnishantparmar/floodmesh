@@ -191,6 +191,11 @@ export function buildTerrainModel(elev, w, h, cellM) {
   return { w, h, cellM, elev, tpiLocal, tpiBroad, acc, pond, score, rank: smooth, rLocalM: rLocal * cellM, rBroadM: rBroad * cellM };
 }
 
+export function exposure(score) {
+  const t = Math.min(1, Math.max(0, (score - 0.5) / 0.5));
+  return t ** 1.3;
+}
+
 export function weatherFactor(rainInPerHr) {
   return 0.12 + 0.88 * Math.min(1, Math.max(0, rainInPerHr) / 1.0);
 }
@@ -198,7 +203,7 @@ export function weatherFactor(rainInPerHr) {
 export function liveRisk(model, factor, observations, sigmaM = 90) {
   const { w, h, score, cellM } = model;
   const out = new Float32Array(w * h);
-  for (let k = 0; k < out.length; k += 1) out[k] = score[k] * factor;
+  for (let k = 0; k < out.length; k += 1) out[k] = exposure(score[k]) * factor;
   const sigma = sigmaM / cellM;
   const reach = Math.ceil(sigma * 3);
   for (const ob of observations) {
@@ -215,12 +220,12 @@ export function liveRisk(model, factor, observations, sigmaM = 90) {
 }
 
 const RAMP = [
-  [0.0, 255, 214, 102, 0],
-  [0.12, 255, 214, 102, 0.22],
-  [0.35, 247, 166, 35, 0.42],
-  [0.6, 228, 94, 38, 0.58],
-  [0.85, 178, 28, 32, 0.7],
-  [1.0, 140, 18, 30, 0.76],
+  [0.0, 214, 170, 60, 0],
+  [0.12, 214, 170, 60, 0.2],
+  [0.35, 214, 148, 46, 0.38],
+  [0.6, 204, 104, 40, 0.52],
+  [0.85, 168, 54, 42, 0.64],
+  [1.0, 140, 36, 36, 0.7],
 ];
 
 export function rampColor(v) {
@@ -252,10 +257,10 @@ export function colorize(values) {
 }
 
 export const RISK_LEVELS = [
-  { key: 'low', label: 'Low', max: 0.25, color: '#2f7d4f' },
-  { key: 'moderate', label: 'Moderate', max: 0.5, color: '#a87a00' },
-  { key: 'high', label: 'High', max: 0.75, color: '#d0610b' },
-  { key: 'severe', label: 'Severe', max: Infinity, color: '#c0392b' },
+  { key: 'low', label: 'Low', max: 0.25, color: '#3d7a55' },
+  { key: 'moderate', label: 'Moderate', max: 0.5, color: '#a7780b' },
+  { key: 'high', label: 'High', max: 0.75, color: '#c25e1a' },
+  { key: 'severe', label: 'Severe', max: Infinity, color: '#a3302a' },
 ];
 
 export function riskLevel(v) {

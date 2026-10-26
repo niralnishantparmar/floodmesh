@@ -1,4 +1,4 @@
-import { icon } from './icons.js';
+import { LOGO, icon } from './brand.js';
 
 const DROPS = [
   [36, 30], [92, 62], [150, 24], [208, 70], [262, 36], [318, 80], [372, 28], [430, 64], [486, 34],
@@ -6,137 +6,143 @@ const DROPS = [
   [20, 160], [96, 172], [520, 70], [548, 112],
 ];
 
-const drops = DROPS.map(([x, y], k) => `<path class="drop" style="animation-delay:${(-(k * 0.37) % 1.4).toFixed(2)}s" d="M${x} ${y}l-5 11"/>`).join('');
+const drops = DROPS.map(([x, y], k) => `<path class="drop" style="animation-delay:${(-(k * 0.37) % 1.4).toFixed(2)}s" d="M${x} ${y}l-4 10"/>`).join('');
 
 export const ILLUSTRATION = `
-<svg class="hero-art" viewBox="0 0 640 360" role="img" aria-label="Cross-section of a street at the bottom of a hill with water pooled under a FloodMesh sensor">
-  <rect width="640" height="360" fill="#e8f0f5"/>
-  <g class="clouds" fill="#ffffff">
-    <ellipse cx="120" cy="34" rx="58" ry="20"/><ellipse cx="160" cy="26" rx="40" ry="22"/><ellipse cx="88" cy="40" rx="34" ry="16"/>
-    <ellipse cx="420" cy="30" rx="50" ry="17"/><ellipse cx="452" cy="22" rx="34" ry="18"/>
+<svg class="art" viewBox="0 0 640 360" role="img" aria-label="A street at the bottom of a hill, with rainwater pooled under a sensor mounted on a pole">
+  <rect width="640" height="360" fill="#e7f1f8"/>
+  <g fill="#ffffff"><ellipse cx="120" cy="36" rx="56" ry="18"/><ellipse cx="158" cy="28" rx="38" ry="20"/><ellipse cx="430" cy="32" rx="46" ry="15"/></g>
+  <g stroke="#8fb6d1" stroke-width="1.8" stroke-linecap="round">${drops}</g>
+  <g class="tide">
+    <rect x="250" y="246" width="320" height="70" fill="#2f7fc1"/>
+    <line x1="250" y1="246" x2="570" y2="246" stroke="#ffffff" stroke-width="1.6" stroke-opacity="0.75"/>
   </g>
-  <g stroke="#8fb3cc" stroke-width="2" stroke-linecap="round">${drops}</g>
-  <g class="water-level">
-    <rect x="250" y="246" width="320" height="70" fill="#4f97cf"/>
-    <line x1="250" y1="246" x2="570" y2="246" stroke="#ffffff" stroke-width="2" stroke-opacity="0.75"/>
+  <path d="M0 140 C 130 150, 250 238, 380 262 S 520 256, 640 200 L640 360 L0 360 Z" fill="#e9dcbc"/>
+  <path d="M0 140 C 130 150, 250 238, 380 262 S 520 256, 640 200" fill="none" stroke="#0f2740" stroke-width="6" stroke-linecap="round"/>
+  <path d="M0 140 C 130 150, 250 238, 380 262 S 520 256, 640 200" fill="none" stroke="#f5c242" stroke-width="1.2" stroke-dasharray="9 11" transform="translate(0 -1)"/>
+  <g transform="translate(176 196) rotate(24)">
+    <path d="M-30 -2 L-24 -14 L8 -14 L16 -2 Z" fill="#ec6a4c"/>
+    <rect x="-34" y="-4" width="54" height="11" rx="3" fill="#ec6a4c"/>
+    <path d="M-21 -12 L-17 -5 L2 -5 L6 -12 Z" fill="#e3f1fb"/>
+    <circle cx="-22" cy="8" r="5" fill="#0f2740"/><circle cx="10" cy="8" r="5" fill="#0f2740"/>
   </g>
-  <path d="M0 140 C 130 150, 250 238, 380 262 S 520 256, 640 200 L640 360 L0 360 Z" fill="#d3dbcf"/>
-  <path d="M0 140 C 130 150, 250 238, 380 262 S 520 256, 640 200" fill="none" stroke="#33414d" stroke-width="7" stroke-linecap="round"/>
-  <path d="M0 140 C 130 150, 250 238, 380 262 S 520 256, 640 200" fill="none" stroke="#ffffff" stroke-width="1.2" stroke-dasharray="10 12" transform="translate(0 -1)"/>
-  <path d="M0 158 C 130 168, 250 256, 380 280 S 520 274, 640 218" fill="none" stroke="#bcc6b8" stroke-width="2"/>
-
-  <g class="car" transform="translate(176 196) rotate(24)">
-    <path d="M-30 -2 L-24 -14 L8 -14 L16 -2 Z" fill="#1f6fb2"/>
-    <rect x="-34" y="-4" width="54" height="11" rx="3" fill="#1f6fb2"/>
-    <path d="M-21 -12 L-17 -5 L2 -5 L6 -12 Z" fill="#cfe3f2"/>
-    <circle cx="-22" cy="8" r="5" fill="#22303b"/><circle cx="10" cy="8" r="5" fill="#22303b"/>
+  <rect x="560" y="110" width="5" height="128" fill="#3a4b5c"/>
+  <rect x="436" y="112" width="129" height="4" fill="#3a4b5c"/>
+  <polygon points="540,94 588,82 592,90 544,102" fill="#163e66" stroke="#e7f1f8" stroke-width="1.5"/>
+  <rect x="552" y="100" width="22" height="14" rx="2" fill="#0f2740"/>
+  <rect x="426" y="116" width="30" height="16" rx="3" fill="#0f2740"/>
+  <g fill="none" stroke="#2f7fc1" stroke-width="2" stroke-linecap="round">
+    <path class="ping" d="M430 148 Q441 154 452 148"/>
+    <path class="ping" style="animation-delay:.25s" d="M424 170 Q441 180 458 170"/>
+    <path class="ping" style="animation-delay:.5s" d="M418 193 Q441 205 464 193"/>
+    <path class="ping" style="animation-delay:.75s" d="M412 216 Q441 230 470 216"/>
   </g>
-
-  <rect x="560" y="110" width="6" height="128" fill="#5b6875"/>
-  <rect x="436" y="112" width="130" height="5" fill="#5b6875"/>
-  <polygon points="540,94 588,82 592,90 544,102" fill="#1d3c58" stroke="#ffffff" stroke-width="1.5"/>
-  <rect x="552" y="100" width="22" height="14" rx="2" fill="#0b2a44"/>
-  <rect x="426" y="117" width="30" height="16" rx="2.5" fill="#0b2a44"/>
-  <g fill="none" stroke="#11a39a" stroke-width="2.2" stroke-linecap="round">
-    <path class="ping" style="animation-delay:0s" d="M430 148 Q441 154 452 148"/>
-    <path class="ping" style="animation-delay:0.25s" d="M424 170 Q441 180 458 170"/>
-    <path class="ping" style="animation-delay:0.5s" d="M418 193 Q441 205 464 193"/>
-    <path class="ping" style="animation-delay:0.75s" d="M412 216 Q441 230 470 216"/>
-  </g>
-  <g fill="none" stroke="#0b2a44" stroke-width="2" stroke-linecap="round">
-    <path class="signal" style="animation-delay:0s" d="M584 66 a12 12 0 0 1 12 12"/>
-    <path class="signal" style="animation-delay:0.4s" d="M584 54 a24 24 0 0 1 24 24"/>
-  </g>
-
-  <g transform="translate(588 108) scale(0.8)">
-    <g class="phone">
-      <rect x="0" y="0" width="58" height="104" rx="9" fill="#ffffff" stroke="#0b2a44" stroke-width="2.5"/>
-      <g class="phone-alert">
-        <rect x="6" y="18" width="46" height="26" rx="5" fill="#fbe9e7" stroke="#c0392b" stroke-width="1.2"/>
-        <circle cx="13" cy="25" r="3" fill="#c0392b"/>
-        <rect x="19" y="23" width="28" height="3.5" rx="1.5" fill="#c0392b"/>
-        <rect x="10" y="32" width="36" height="3" rx="1.5" fill="#8a5b55"/>
-        <rect x="10" y="38" width="26" height="3" rx="1.5" fill="#8a5b55"/>
-      </g>
-      <rect x="10" y="54" width="38" height="3" rx="1.5" fill="#c9d1d8"/>
-      <rect x="10" y="61" width="30" height="3" rx="1.5" fill="#c9d1d8"/>
-    </g>
-  </g>
-
-  <g font-family="Montserrat, sans-serif" font-size="13" font-weight="600" fill="#0b2a44">
-    <text x="236" y="112">Sensor measures the gap</text>
-    <text x="236" y="128">to the water every second</text>
-    <path d="M396 120 L424 124" stroke="#0b2a44" stroke-width="1.2"/>
-    <text x="300" y="330">Water collects at the bottom of the hill</text>
-    <path d="M396 316 L412 256" stroke="#0b2a44" stroke-width="1.2"/>
-    <text x="22" y="236">Drivers see it on the map</text>
-    <text x="22" y="252">before they reach it</text>
+  <g font-family="'Public Sans', sans-serif" font-size="12.5" font-weight="600" fill="#0f2740">
+    <text x="244" y="114">The sensor measures the gap</text>
+    <text x="244" y="130">down to the water</text>
+    <path d="M400 124 L424 124" stroke="#0f2740" stroke-width="1"/>
+    <text x="308" y="330">Water collects where the ground dips</text>
+    <path d="M400 316 L412 256" stroke="#0f2740" stroke-width="1"/>
   </g>
 </svg>`;
 
-const STEPS = [
-  { icon: 'sensor', tone: 'blue', title: 'Measure', body: 'A small solar-powered sensor mounted above the road measures the distance down to the surface several times a second, so it notices right away when water starts to collect underneath it.' },
-  { icon: 'layers', tone: 'teal', title: 'Combine', body: 'Every reading is laid over USGS elevation data and the National Weather Service forecast, which shows where water is likely to pool across the whole neighborhood and not just at the sensor.' },
-  { icon: 'chart', tone: 'amber', title: 'Predict', body: 'A neural network trained on years of readings from a nearby stream gauge, along with the rainfall that caused them, estimates how high the water will be 30 and 60 minutes from now.' },
-  { icon: 'bell', tone: 'navy', title: 'Alert', body: 'Drivers see flooded streets on the map before they get there, homeowners hear about water in the basement right away, and the town can see where the next sensor should go.' },
+const FLOW = [
+  ['measure', 't-blue', 'Measure', 'A sensor above a road or basement floor measures the distance down to the surface. When water collects, that distance shrinks and the sensor reports it.'],
+  ['map', 't-mint', 'Map', 'Elevation data shows the low spots and drainage paths where water gathers, and the rain forecast shows how likely they are to fill up.'],
+  ['predict', 't-sun', 'Predict', 'A neural network trained on seven years of river readings and rainfall estimates where the water will be in 30 and 60 minutes.'],
+  ['alert', 't-coral', 'Alert', 'People watching a sensor hear about rising water before the road goes under, and residents can report flooding they see.'],
 ];
 
-const AUDIENCES = [
-  { icon: 'car', tone: 'blue', title: 'Drivers and residents', body: 'Check the streets on your route before you head out, and report any flooding you run into so the next driver knows about it.', action: 'Open the live map', go: 'public' },
-  { icon: 'home', tone: 'teal', title: 'Homeowners', body: 'Put a sensor in the basement and it will alert your phone as soon as standing water shows up, even if the power goes out.', action: 'Set up a home sensor', go: 'home' },
-  { icon: 'city', tone: 'amber', title: 'Municipal staff', body: 'Keep an eye on every street sensor from one table, install new ones right from the map, and see a ranked list of the places that still need coverage.', action: 'Municipal sign in', go: 'auth' },
+const LANES = [
+  ['l-street', 't-blue', 'measure', 'On the street', 'The sensor itself, built from parts that cost about $70.', [
+    ['chip', 'ESP32-S3 microcontroller', 'Reads the sensors, filters out splashes, and sends a reading every 10 seconds over Wi-Fi.'],
+    ['waves', 'Waterproof ultrasonic sensor', 'Measures the distance down to the water from up to 15 feet away.'],
+    ['thermo', 'Temperature probe', 'Tracks the air temperature so the app can warn about ice.'],
+    ['sun', 'Solar charger and battery', 'Keeps the sensor running through cloudy days and power outages.'],
+    ['phone', 'Phone setup page', 'Lets anyone connect the sensor to Wi-Fi and pair it without touching code.'],
+  ]],
+  ['l-cloud', 't-mint', 'database', 'In the cloud', 'Where readings are stored, protected, and turned into predictions.', [
+    ['database', 'Supabase and Postgres', 'Stores readings, sensors, and accounts, and pushes new readings to the map the moment they arrive.'],
+    ['shield', 'Row-level security', 'Keeps home sensors private and limits street sensors to verified town staff.'],
+    ['key', 'Server-side checks', 'Handle sensor pairing, report removal, and spam limits so they can\'t be bypassed.'],
+    ['nodes', 'Neural network forecast', 'Trained in Python with scikit-learn on seven years of USGS river readings.'],
+  ]],
+  ['l-screen', 't-sun', 'map', 'On your screen', 'A web app that runs on any phone or laptop with nothing to install.', [
+    ['code', 'JavaScript web app', 'Hosted on GitHub Pages and built without a framework, so it loads quickly.'],
+    ['layers', 'Leaflet maps', 'Draws the map, the sensors, resident reports, and the risk shading.'],
+    ['mountain', 'Terrain flood model', 'Finds low spots and drainage paths from elevation data, right in the browser.'],
+    ['chart', 'Chart.js', 'Plots each sensor\'s water level along with its forecast for the next hour.'],
+  ]],
 ];
 
-const STATS = [
-  ['10 sec', 'between readings'],
-  ['50 ft', 'terrain detail'],
-  ['60 min', 'water level forecast'],
+const SOURCES = [
+  ['mountain', 'USGS 3DEP', 'Elevation for any spot in the US, with global coverage from other sources'],
+  ['river', 'USGS river gauges', 'Seven years of readings used to train the forecast'],
+  ['rain', 'Open-Meteo', 'Hourly rainfall and the forecast for anywhere in the world'],
+  ['alert', 'National Weather Service', 'Active flood watches and warnings'],
+  ['shield', 'FEMA', 'Official flood zone maps for the United States'],
+  ['pin', 'OpenStreetMap', 'Roads, place search, and the base map'],
+];
+
+const WHO = [
+  ['car', 't-blue', 'Drivers and residents', 'Look up any address, check your route before heading out, and report flooding you come across.', 'Open the map', 'map'],
+  ['home', 't-mint', 'Homeowners', 'A sensor in the basement alerts your phone at the first sign of standing water, even during a power outage.', 'Add a home sensor', 'mine'],
+  ['city', 't-coral', 'Town staff', 'See every street sensor at a glance, add new ones in minutes, and find the low spots that still need coverage.', 'Staff sign in', 'auth'],
 ];
 
 export function welcomeHtml() {
-  const steps = STEPS.map((s) => `
-    <li class="step reveal tone-${s.tone}">
-      <div class="step-icon">${icon(s.icon)}</div>
-      <h3>${s.title}</h3>
-      <p>${s.body}</p>
-    </li>`).join('');
-  const audiences = AUDIENCES.map((a) => `
-    <article class="audience reveal tone-${a.tone}">
-      <div class="audience-icon">${icon(a.icon)}</div>
-      <h3>${a.title}</h3>
-      <p>${a.body}</p>
-      <button class="link-btn arrow" data-welcome="${a.go}">${a.action}</button>
-    </article>`).join('');
-  const stats = STATS.map(([big, small]) => `<div class="stat"><span class="stat-big">${big}</span><span class="stat-small">${small}</span></div>`).join('');
+  const flow = FLOW.map(([ic, tone, title, text]) => `<div class="${tone}"><div class="bubble">${icon(ic)}</div><h3>${title}</h3><p>${text}</p></div>`).join('');
+  const lanes = LANES.map(([cls, tone, ic, title, intro, parts], k) => `
+    ${k ? '<div class="arrow-gap"><span>&rarr;</span></div>' : ''}
+    <div class="lane ${cls} ${tone}">
+      <h3><span class="chip">${icon(ic)}</span>${title}</h3>
+      <p>${intro}</p>
+      ${parts.map(([pi, name, role]) => `<div class="part ${tone}"><span class="chip">${icon(pi)}</span><div><strong>${name}</strong><span>${role}</span></div></div>`).join('')}
+    </div>`).join('');
+  const sources = SOURCES.map(([ic, name, what]) => `<div class="source t-deep"><span class="chip">${icon(ic)}</span><strong>${name}</strong><span>${what}</span></div>`).join('');
+  const who = WHO.map(([ic, tone, title, text, action, go]) => `<div class="${tone}"><div class="bubble">${icon(ic)}</div><h3>${title}</h3><p>${text}</p><button class="link" data-welcome="${go}">${action}</button></div>`).join('');
   return `
-    <section class="hero-band">
-      <div class="welcome-inner">
-        <button class="welcome-close" data-welcome="public" aria-label="Close and open the map">Skip to map</button>
-        <div class="hero">
-          <div class="hero-text">
+    <section class="w-hero contours">
+      <div class="w-inner">
+        <nav class="w-nav">
+          <span class="brand" aria-label="FloodMesh">${LOGO}</span>
+          <button data-welcome="how">How it works</button>
+          <button data-welcome="stack">How it's built</button>
+          <button data-welcome="who">Who it's for</button>
+          <button class="btn small sun" data-welcome="map">Open the map</button>
+        </nav>
+        <div class="w-hero-grid">
+          <div>
             <h1>FloodMesh</h1>
-            <p class="lede">Live street-level flood readings for Edison, starting at the bottom of the Mt. Pleasant Ave hill near John Adams Middle School and J.P. Stevens High School. The map pairs those readings with elevation data, the rain forecast, and a neural network that predicts the next hour.</p>
-            <div class="hero-actions">
-              <button class="btn btn-large btn-accent" data-welcome="public">Open the live map</button>
-              <button class="btn btn-large btn-ghost" data-welcome="how">See how it works</button>
-            </div>
-            <div class="stats">${stats}</div>
+            <p class="w-sub">A live map of street flooding, built from small water sensors, public elevation data, and a forecast that looks an hour ahead.</p>
+            <p class="w-lede">Search for any address to see which nearby spots collect water first in a heavy storm. Wherever FloodMesh sensors are installed, the map also shows the actual water level on the road, updated every ten seconds, along with a prediction of where it's headed.</p>
+            <p class="w-actions"><button class="btn big sun" data-welcome="map">Open the map</button><button class="link" data-welcome="how">See how it works</button></p>
           </div>
-          <div class="hero-figure">${ILLUSTRATION}</div>
+          <figure class="w-art">${ILLUSTRATION}</figure>
         </div>
       </div>
     </section>
-    <section class="how" id="how-it-works">
-      <div class="welcome-inner">
+    <section class="w-section" id="how-it-works">
+      <div class="w-inner">
         <h2>How it works</h2>
-        <ol class="steps">${steps}</ol>
+        <p class="w-intro">Four steps take a reading from a puddle under a sensor to an alert on someone's phone.</p>
+        <div class="flow">${flow}</div>
       </div>
     </section>
-    <section class="who">
-      <div class="welcome-inner">
-        <h2>Who it's for</h2>
-        <div class="audiences">${audiences}</div>
-        <p class="welcome-foot">Elevation comes from USGS 3DEP through AWS Terrain Tiles, weather from the National Weather Service and Open-Meteo, flood zones from FEMA, stream data from the USGS, and map data from OpenStreetMap contributors.</p>
+    <section class="w-section w-built" id="how-its-built">
+      <div class="w-inner">
+        <h2>How it's built</h2>
+        <p class="w-intro">Every reading travels from the street, through the cloud, to your screen. Here is what handles each part of that trip.</p>
+        <div class="stack">${lanes}</div>
+        <div class="sources"><h3>Public data it reads</h3><div class="source-row">${sources}</div></div>
       </div>
-    </section>`;
+    </section>
+    <section class="w-section" id="who-its-for">
+      <div class="w-inner">
+        <h2>Who it's for</h2>
+        <p class="w-intro">The same map serves three kinds of people, each with their own tools.</p>
+        <div class="who">${who}</div>
+      </div>
+    </section>
+    <footer class="w-inner w-foot">Elevation from USGS 3DEP and AWS Terrain Tiles. Weather from Open-Meteo and the National Weather Service. Flood zones from FEMA. River data from the USGS. Map data from OpenStreetMap contributors.</footer>`;
 }

@@ -1,4 +1,4 @@
-const ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14M5 12h10M5 16h6" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>`;
+const ICON = `<svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="12" fill="#fbf6ea"/><path d="M4.1 17.5 C 7.8 14.9, 11 14.9, 14.5 17.5 S 21.4 20.1, 25 17.5 C 26 16.8, 27 16.7, 27.9 17.5 A12 12 0 0 1 4.1 17.5 Z" fill="#2f7fc1"/></svg>`;
 
 const MAX_VISIBLE = 4;
 const SHOW_MS = 9000;

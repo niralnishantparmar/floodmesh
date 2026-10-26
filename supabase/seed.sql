@@ -1,21 +1,6 @@
 insert into public.sensors
-  (mode, owner_id, name, location_note, lat, lng, mount_height_cm, alert_depth_cm, is_simulated)
-select 'street', u.id, v.name, v.note, v.lat, v.lng, v.mount, v.alert, v.sim
-from auth.users u
-cross join (values
-  ('Mt. Pleasant Ave',          'Bottom of the hill, near 45-59 Mt. Pleasant Ave', 40.5759977, -74.3672054, 110::real, 15::real, false),
-  ('J.P. Stevens High School',  '855 Grove Ave',                                   40.580263,  -74.36070,   120::real, 15::real, true),
-  ('John Adams Middle School',  '1081 New Dover Rd',                               40.579028,  -74.369306,  120::real, 15::real, true)
-) as v(name, note, lat, lng, mount, alert, sim)
-where u.email = 'niralnishantparmar+official@gmail.com';
-
-insert into public.sensors
   (mode, owner_id, name, location_note, mount_height_cm, alert_depth_cm, is_simulated)
-select 'personal', u.id, 'Basement', 'Next to the water heater', 80, 2, true
+select 'personal', u.id, 'Basement (demo unit)', 'Simulated readings for demonstrations', 80, 2, true
 from auth.users u
-where u.email = 'niralnishantparmar+home@gmail.com';
-
-select s.name, s.mode, s.is_simulated, k.device_key
-from public.sensors s
-join public.sensor_keys k on k.sensor_id = s.id
-order by s.mode desc, s.name;
+where u.email = 'niralnishantparmar+home@gmail.com'
+  and not exists (select 1 from public.sensors s where s.owner_id = u.id and s.is_simulated);

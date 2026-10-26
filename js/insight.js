@@ -1,73 +1,149 @@
-import { loadTerrain, loadWeather, loadRoads, rasterizeRoads, loadHourlyRain } from './sources.js';
+import { loadTerrain, loadWeather, loadAlerts, loadRoads, rasterizeRoads, cellSizeM } from './sources.js';
 import {
   buildTerrainModel, liveRisk, weatherFactor, colorize, recommendSites, riskLevel, quantile, percentRank,
   SQM_PER_ACRE, FT_PER_M,
 } from './risk.js';
+import { MIN_RISK_ZOOM } from './config.js';
+
+const MAX_CELLS_ACROSS = 520;
+const WEATHER_REFRESH_MS = 15 * 60000;
+const WEATHER_MOVE_KM = 15;
+
+function padBounds(b, frac) {
+  const dLat = (b.north - b.south) * frac;
+  const dLng = (b.east - b.west) * frac;
+  return { south: b.south - dLat, north: b.north + dLat, west: b.west - dLng, east: b.east + dLng };
+}
+
+function contains(outer, inner) {
+  return outer.south <= inner.south && outer.north >= inner.north && outer.west <= inner.west && outer.east >= inner.east;
+}
+
+function widthM(b) {
+  const lat = (b.north + b.south) / 2;
+  return (b.east - b.west) * 111320 * Math.cos((lat * Math.PI) / 180);
+}
+
+function km(a, b) {
+  const dLat = (a[0] - b[0]) * 111.32;
+  const dLng = (a[1] - b[1]) * 111.32 * Math.cos((a[0] * Math.PI) / 180);
+  return Math.hypot(dLat, dLng);
+}
+
+export function terrainZoomFor(b) {
+  const lat = (b.north + b.south) / 2;
+  const span = widthM(b);
+  for (let z = 14; z >= 10; z -= 1) {
+    if (span / cellSizeM(lat, z, 2) <= MAX_CELLS_ACROSS) return z;
+  }
+  return 10;
+}
 
 export class RiskEngine {
-  constructor({ bounds, center, onUpdate }) {
-    this.bounds = bounds;
-    this.center = center;
+  constructor({ onUpdate }) {
     this.onUpdate = onUpdate;
-    this.terrainStatus = 'loading';
+    this.status = 'idle';
     this.grid = null;
     this.model = null;
+    this.region = null;
     this.weather = null;
+    this.weatherAt = null;
+    this.alerts = [];
     this.roads = null;
     this.roadHit = null;
     this.mode = 'heavy';
     this.replayRain = null;
+    this.obsPoints = [];
     this.obsCells = [];
     this.obsKey = '';
     this.lastKey = '';
     this.liveNow = null;
+    this.liveNowKey = '';
+    this.token = 0;
     this.canvas = null;
   }
 
-  async init() {
-    try {
-      const { grid, elev } = await loadTerrain(this.bounds);
-      this.grid = grid;
-      this.model = buildTerrainModel(elev, grid.w, grid.h, grid.cellM);
-      this.terrainStatus = 'ready';
-    } catch (err) {
-      console.warn('Elevation data unavailable', err);
-      this.terrainStatus = 'failed';
-    }
-    this.onUpdate('terrain');
-    this.refreshWeather();
-    if (this.grid) this.loadRoadData();
-  }
-
-  async refreshWeather() {
-    const [weather, hourly] = await Promise.allSettled([
-      loadWeather(this.center[0], this.center[1]),
-      loadHourlyRain(this.center[0], this.center[1]),
-    ]);
-    this.weather = weather.status === 'fulfilled' ? weather.value : { error: true };
-    this.hourlyRain = hourly.status === 'fulfilled' ? hourly.value : null;
-    this.lastKey = '';
-    this.onUpdate('weather');
-  }
-
-  async loadRoadData() {
-    try {
-      this.roads = await loadRoads(this.grid.bounds);
-      this.roadHit = rasterizeRoads(this.roads, this.grid);
-    } catch (err) {
-      console.warn('Road data unavailable; sensor sites will not be limited to roads', err);
-    }
-    this.onUpdate('roads');
-  }
-
   get ready() {
-    return this.model !== null;
+    return this.status === 'ready' && this.model !== null;
+  }
+
+  get resolutionFt() {
+    return this.model ? this.model.cellM * FT_PER_M : null;
+  }
+
+  async analyzeView(view, zoom) {
+    this.maybeRefreshWeather([(view.north + view.south) / 2, (view.east + view.west) / 2]);
+    if (zoom < MIN_RISK_ZOOM) {
+      this.token += 1;
+      this.status = 'zoom';
+      this.onUpdate('status');
+      return;
+    }
+    const padded = padBounds(view, 0.3);
+    const tz = terrainZoomFor(padded);
+    if (this.ready && this.region && this.region.tz === tz && contains(this.region.bounds, view)) return;
+    this.token += 1;
+    const token = this.token;
+    this.status = 'loading';
+    this.onUpdate('status');
+    try {
+      const { grid, elev } = await loadTerrain([[padded.south, padded.west], [padded.north, padded.east]], { zoom: tz, factor: 2 });
+      if (token !== this.token) return;
+      const model = buildTerrainModel(elev, grid.w, grid.h, grid.cellM);
+      if (token !== this.token) return;
+      this.grid = grid;
+      this.model = model;
+      this.region = { bounds: padded, tz };
+      this.roads = null;
+      this.roadHit = null;
+      this.canvas = null;
+      this.status = 'ready';
+      this.lastKey = '';
+      this.liveNow = null;
+      this.setObservations(this.obsPoints);
+      this.onUpdate('terrain');
+      if (tz >= 13 && widthM(padded) < 9000) this.loadRoadData(token);
+    } catch (err) {
+      if (token !== this.token) return;
+      console.warn('Elevation data unavailable', err);
+      this.status = 'failed';
+      this.onUpdate('status');
+    }
+  }
+
+  async loadRoadData(token) {
+    try {
+      const roads = await loadRoads(this.grid.bounds);
+      if (token !== this.token) return;
+      this.roads = roads;
+      this.roadHit = rasterizeRoads(roads, this.grid);
+      this.onUpdate('roads');
+    } catch (err) {
+      console.warn('Road data unavailable', err);
+    }
+  }
+
+  maybeRefreshWeather(center) {
+    const stale = !this.weatherAt || Date.now() - this.weatherAt.time > WEATHER_REFRESH_MS;
+    const moved = !this.weatherAt || km(center, this.weatherAt.center) > WEATHER_MOVE_KM;
+    if (!stale && !moved) return;
+    this.weatherAt = { center, time: Date.now() };
+    this.refreshWeather(center);
+  }
+
+  async refreshWeather(center) {
+    const [weather, alerts] = await Promise.allSettled([loadWeather(center[0], center[1]), loadAlerts(center[0], center[1])]);
+    this.weather = weather.status === 'fulfilled' ? weather.value : { error: true };
+    this.alerts = alerts.status === 'fulfilled' ? alerts.value : [];
+    this.lastKey = '';
+    this.liveNow = null;
+    this.onUpdate('weather');
   }
 
   rainNow() {
     if (this.replayRain != null) return this.replayRain;
     const w = this.weather;
-    if (!w || w.error || w.rain6In == null) return 0;
+    if (!w || w.error) return 0;
     return w.rain6In / 6;
   }
 
@@ -77,6 +153,7 @@ export class RiskEngine {
   }
 
   setObservations(points) {
+    this.obsPoints = points;
     if (!this.grid) return;
     const cells = [];
     for (const p of points) {
@@ -106,9 +183,9 @@ export class RiskEngine {
   }
 
   render() {
-    if (!this.model) return null;
+    if (!this.ready) return null;
     const factor = this.mode === 'heavy' ? 1 : this.nowFactor();
-    const key = `${this.mode}|${(Math.round(factor * 50) / 50).toFixed(2)}|${this.obsKey}`;
+    const key = `${this.token}|${this.mode}|${(Math.round(factor * 50) / 50).toFixed(2)}|${this.obsKey}`;
     if (key === this.lastKey) return null;
     this.lastKey = key;
     const values = this.mode === 'heavy' ? liveRisk(this.model, 1, this.obsCells) : this.getLiveNow();
@@ -118,8 +195,7 @@ export class RiskEngine {
       this.canvas.width = w;
       this.canvas.height = h;
     }
-    const ctx = this.canvas.getContext('2d');
-    ctx.putImageData(new ImageData(colorize(values), w, h), 0, 0);
+    this.canvas.getContext('2d').putImageData(new ImageData(colorize(values), w, h), 0, 0);
     return { url: this.canvas.toDataURL('image/png'), bounds: this.grid.bounds };
   }
 
@@ -147,27 +223,45 @@ export class RiskEngine {
     return '';
   }
 
-  sites(existingSensors) {
-    if (!this.model) return [];
-    const mask = this.roadMask();
+  viewMask(view) {
+    const { w, h } = this.grid;
+    const a = this.grid.toCell(Math.min(view.north, this.grid.bounds[1][0] - 1e-9), Math.max(view.west, this.grid.bounds[0][1] + 1e-9)) || { i: 0, j: 0 };
+    const b = this.grid.toCell(Math.max(view.south, this.grid.bounds[0][0] + 1e-9), Math.min(view.east, this.grid.bounds[1][1] - 1e-9)) || { i: w - 1, j: h - 1 };
+    const roads = this.roadMask();
+    const mask = new Uint8Array(w * h);
+    for (let j = a.j; j <= b.j; j += 1) {
+      for (let i = a.i; i <= b.i; i += 1) {
+        const k = j * w + i;
+        mask[k] = roads ? roads[k] : 1;
+      }
+    }
+    return mask;
+  }
+
+  sites(view, existingSensors) {
+    if (!this.ready) return [];
     const existing = existingSensors
       .map((s) => (s.lat != null ? this.grid.toCell(s.lat, s.lng) : null))
       .filter(Boolean);
-    return recommendSites(this.model, { mask, existing, count: 5 }).map((p) => {
-      const [lat, lng] = this.grid.toLatLng(p.i, p.j);
-      return { lat, lng, i: p.i, j: p.j, score: p.score, road: this.roadNameAt(p.i, p.j), ...this.analyze(lat, lng) };
-    });
+    return recommendSites(this.model, { mask: this.viewMask(view), existing, count: 5 })
+      .map((p) => {
+        const [lat, lng] = this.grid.toLatLng(p.i, p.j);
+        return { lat, lng, score: p.score, road: this.roadNameAt(p.i, p.j) };
+      })
+      .map((s) => ({ ...s, ...this.analyze(s.lat, s.lng) }));
   }
 
   analyze(lat, lng) {
-    if (!this.model) return null;
+    if (!this.ready) return null;
     const c = this.grid.toCell(lat, lng);
     if (!c) return { outside: true };
     const m = this.model;
     const k = c.j * m.w + c.i;
     const live = this.getLiveNow();
-    const heavy = liveRisk(m, 1, this.obsCells.filter((o) => Math.abs(o.i - c.i) < 40 && Math.abs(o.j - c.j) < 40));
+    const near = this.obsCells.filter((o) => Math.abs(o.i - c.i) < 40 && Math.abs(o.j - c.j) < 40);
+    const heavy = liveRisk(m, 1, near);
     const mask = this.roadMask();
+    const onRoad = Boolean(mask && mask[k]);
     return {
       outside: false,
       elevFt: m.elev[k] * FT_PER_M,
@@ -177,20 +271,30 @@ export class RiskEngine {
       broadRadiusFt: m.rBroadM * FT_PER_M,
       acres: (m.acc[k] * m.cellM * m.cellM) / SQM_PER_ACRE,
       pondFt: m.pond[k] * FT_PER_M,
-      terrain: m.score[k],
-      rank: percentRank(m.rank, k, mask && mask[k] ? mask : null),
-      rankAgainstRoads: Boolean(mask && mask[k]),
+      rank: percentRank(m.rank, k, onRoad ? mask : null),
+      rankAgainstRoads: onRoad,
       now: live[k],
       heavy: heavy[k],
       levelNow: riskLevel(live[k]),
       levelHeavy: riskLevel(heavy[k]),
+      resolutionFt: m.cellM * FT_PER_M,
     };
   }
 
-  areaLevel() {
+  areaLevel(view) {
     const live = this.getLiveNow();
-    if (!live) return null;
-    const v = quantile(live, 0.98, this.roadMask());
+    if (!live || !this.grid) return null;
+    const a = this.grid.toCell(view.north, view.west) || { i: 0, j: 0 };
+    const b = this.grid.toCell(view.south, view.east) || { i: this.grid.w - 1, j: this.grid.h - 1 };
+    const inView = new Uint8Array(live.length);
+    const roads = this.roadMask();
+    for (let j = Math.max(0, a.j); j <= Math.min(this.grid.h - 1, b.j); j += 1) {
+      for (let i = Math.max(0, a.i); i <= Math.min(this.grid.w - 1, b.i); i += 1) {
+        const k = j * this.grid.w + i;
+        inView[k] = roads ? roads[k] : 1;
+      }
+    }
+    const v = quantile(live, 0.98, inView);
     return { value: v, level: riskLevel(v) };
   }
 }

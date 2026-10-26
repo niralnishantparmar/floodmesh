@@ -1,4 +1,3 @@
-
 const TILE = 256;
 const EARTH_M = 40075016.686;
 
@@ -25,16 +24,24 @@ const pxToLat = (py, z) => {
   return (Math.atan(Math.sinh(n)) * 180) / Math.PI;
 };
 
+export function cellSizeM(lat, zoom, factor) {
+  return ((EARTH_M * Math.cos((lat * Math.PI) / 180)) / (TILE * 2 ** zoom)) * factor;
+}
+
 export function makeGrid(bounds, zoom, factor) {
   const [[south, west], [north, east]] = bounds;
   const originPx = Math.floor(lngToPx(west, zoom));
   const originPy = Math.floor(latToPx(north, zoom));
   const w = Math.floor((Math.ceil(lngToPx(east, zoom)) - originPx) / factor);
   const h = Math.floor((Math.ceil(latToPx(south, zoom)) - originPy) / factor);
-  const latMid = (north + south) / 2;
-  const cellM = ((EARTH_M * Math.cos((latMid * Math.PI) / 180)) / (TILE * 2 ** zoom)) * factor;
   return {
-    zoom, factor, originPx, originPy, w, h, cellM,
+    zoom,
+    factor,
+    originPx,
+    originPy,
+    w,
+    h,
+    cellM: cellSizeM((north + south) / 2, zoom, factor),
     bounds: [
       [pxToLat(originPy + h * factor, zoom), pxToLng(originPx, zoom)],
       [pxToLat(originPy, zoom), pxToLng(originPx + w * factor, zoom)],
@@ -100,64 +107,79 @@ export async function loadTerrain(bounds, { zoom = 14, factor = 2 } = {}) {
   return { grid, elev };
 }
 
-const NWS = 'https://api.weather.gov';
-const nwsHeaders = { Accept: 'application/geo+json' };
+const WEATHER_CODES = {
+  0: 'Clear', 1: 'Mostly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Freezing fog',
+  51: 'Light drizzle', 53: 'Drizzle', 55: 'Heavy drizzle', 56: 'Freezing drizzle', 57: 'Freezing drizzle',
+  61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 67: 'Freezing rain',
+  71: 'Light snow', 73: 'Snow', 75: 'Heavy snow', 77: 'Snow grains', 80: 'Light showers', 81: 'Showers',
+  82: 'Heavy showers', 85: 'Snow showers', 86: 'Heavy snow showers', 95: 'Thunderstorms', 96: 'Thunderstorms with hail',
+  99: 'Thunderstorms with hail',
+};
 
-export function sumPrecip(values, hours, now = Date.now()) {
-  const end = now + hours * 3600e3;
-  let mm = 0;
-  for (const v of values || []) {
-    if (v.value == null) continue;
-    const [startIso, dur] = v.validTime.split('/');
-    const start = Date.parse(startIso);
-    const m = /P(?:(\d+)D)?T?(?:(\d+)H)?/.exec(dur);
-    const days = Number(m && m[1]) || 0;
-    const hrs = Number(m && m[2]) || 0;
-    const span = (days * 24 + hrs) * 3600e3 || 3600e3;
-    const overlap = Math.max(0, Math.min(end, start + span) - Math.max(now, start));
-    mm += v.value * (overlap / span);
-  }
-  return mm;
+export function summarizeHourly(times, precip, probability, nowMs = Date.now()) {
+  const hourly = times.map((t, k) => ({ t: Date.parse(`${t}:00Z`), mm: precip[k] ?? 0, chance: probability ? probability[k] ?? 0 : null }));
+  const ahead = (hours) => hourly.filter((h) => h.t > nowMs && h.t <= nowMs + hours * 3600e3);
+  const sum = (rows) => rows.reduce((total, h) => total + h.mm, 0);
+  const chances = ahead(6).map((h) => h.chance).filter((c) => c != null);
+  return {
+    hourly,
+    rain6In: sum(ahead(6)) / 25.4,
+    rain24In: sum(ahead(24)) / 25.4,
+    rainChance: chances.length ? Math.max(...chances) : null,
+  };
 }
 
 export async function loadWeather(lat, lng) {
-  const at = `${lat.toFixed(4)},${lng.toFixed(4)}`;
-  const point = await (await fetchWithTimeout(`${NWS}/points/${at}`, { headers: nwsHeaders })).json();
-  const props = point.properties;
-  const [hourly, grid, alerts] = await Promise.allSettled([
-    fetchWithTimeout(props.forecastHourly, { headers: nwsHeaders }).then((r) => r.json()),
-    fetchWithTimeout(props.forecastGridData, { headers: nwsHeaders }).then((r) => r.json()),
-    fetchWithTimeout(`${NWS}/alerts/active?point=${at}`, { headers: nwsHeaders }).then((r) => r.json()),
-  ]);
-  const out = { summary: null, tempF: null, rainChance: null, rain6In: null, rain24In: null, alerts: [], updated: Date.now() };
-  if (hourly.status === 'fulfilled') {
-    const periods = hourly.value.properties?.periods || [];
-    const now = periods[0];
-    if (now) {
-      out.summary = now.shortForecast;
-      out.tempF = now.temperatureUnit === 'C' ? Math.round((now.temperature * 9) / 5 + 32) : now.temperature;
-    }
-    const chances = periods.slice(0, 6).map((p) => p.probabilityOfPrecipitation?.value ?? 0);
-    out.rainChance = chances.length ? Math.max(...chances) : null;
-  }
-  if (grid.status === 'fulfilled') {
-    const qpf = grid.value.properties?.quantitativePrecipitation?.values;
-    if (qpf) {
-      out.rain6In = sumPrecip(qpf, 6) / 25.4;
-      out.rain24In = sumPrecip(qpf, 24) / 25.4;
-    }
-  }
-  if (alerts.status === 'fulfilled') {
-    out.alerts = (alerts.value.features || []).map((f) => ({ event: f.properties.event, headline: f.properties.headline }));
-  }
-  return out;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(3)}&longitude=${lng.toFixed(3)}`
+    + '&current=temperature_2m,weather_code&hourly=precipitation,precipitation_probability'
+    + '&past_days=1&forecast_days=2&timezone=GMT&temperature_unit=fahrenheit';
+  const json = await (await fetchWithTimeout(url, {}, 10000)).json();
+  const summary = summarizeHourly(json.hourly.time, json.hourly.precipitation, json.hourly.precipitation_probability);
+  return {
+    ...summary,
+    summary: WEATHER_CODES[json.current?.weather_code] || null,
+    tempF: json.current ? Math.round(json.current.temperature_2m) : null,
+    updated: Date.now(),
+  };
 }
 
-export async function loadHourlyRain(lat, lng) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}`
-    + '&hourly=precipitation&past_days=1&forecast_days=1&timezone=GMT';
-  const json = await (await fetchWithTimeout(url, {}, 10000)).json();
-  return json.hourly.time.map((t, k) => ({ t: Date.parse(`${t}:00Z`), mm: json.hourly.precipitation[k] ?? 0 }));
+export async function loadAlerts(lat, lng) {
+  const url = `https://api.weather.gov/alerts/active?point=${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const json = await (await fetchWithTimeout(url, { headers: { Accept: 'application/geo+json' } }, 8000)).json();
+  return (json.features || []).map((f) => ({ event: f.properties.event, headline: f.properties.headline }));
+}
+
+let lastGeocodeAt = 0;
+const geocodeCache = new Map();
+
+async function geocode(url) {
+  if (geocodeCache.has(url)) return geocodeCache.get(url);
+  const wait = 1100 - (Date.now() - lastGeocodeAt);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastGeocodeAt = Date.now();
+  const json = await (await fetchWithTimeout(url, { headers: { Accept: 'application/json' } }, 10000)).json();
+  geocodeCache.set(url, json);
+  return json;
+}
+
+export async function searchPlaces(query) {
+  const q = encodeURIComponent(query.trim());
+  const rows = await geocode(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${q}`);
+  return rows.map((r) => ({
+    name: r.display_name,
+    short: r.name || r.display_name.split(',')[0],
+    lat: Number(r.lat),
+    lng: Number(r.lon),
+    bounds: r.boundingbox ? [[Number(r.boundingbox[0]), Number(r.boundingbox[2])], [Number(r.boundingbox[1]), Number(r.boundingbox[3])]] : null,
+  }));
+}
+
+export async function placeName(lat, lng) {
+  const json = await geocode(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&lat=${lat.toFixed(4)}&lon=${lng.toFixed(4)}`);
+  const a = json.address || {};
+  const road = a.road || a.pedestrian || a.path || '';
+  const town = a.city || a.town || a.village || a.suburb || a.hamlet || '';
+  return [road, town].filter(Boolean).join(', ') || json.name || '';
 }
 
 const NFHL = 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer';
@@ -190,12 +212,12 @@ export async function femaZoneAt(lat, lng) {
 }
 
 export function describeZone(z) {
-  if (!z || !z.zone) return 'Outside FEMA-mapped flood zones';
-  if (z.sfha || /^A|^V/.test(z.zone)) return `Zone ${z.zone}: 1% annual chance flood area (FEMA high risk)`;
-  if (z.zone === 'X' && /0\.2/.test(z.subtype)) return 'Zone X (shaded): 0.2% annual chance flood area';
-  if (z.zone === 'X') return 'Zone X: minimal flood hazard on FEMA maps';
-  if (z.zone === 'D') return 'Zone D: flood hazard not determined';
-  return `Zone ${z.zone}`;
+  if (!z || !z.zone) return 'Not inside a FEMA-mapped flood zone (FEMA maps cover the United States only).';
+  if (z.sfha || /^A|^V/.test(z.zone)) return `Zone ${z.zone}, a 1% annual chance flood area that FEMA treats as high risk.`;
+  if (z.zone === 'X' && /0\.2/.test(z.subtype)) return 'Zone X (shaded), a 0.2% annual chance flood area.';
+  if (z.zone === 'X') return 'Zone X, which FEMA maps as minimal flood hazard.';
+  if (z.zone === 'D') return 'Zone D, where FEMA has not determined the flood hazard.';
+  return `Zone ${z.zone}.`;
 }
 
 const ROAD_TYPES = 'motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|primary_link|secondary_link|tertiary_link';

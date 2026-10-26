@@ -1,124 +1,203 @@
-import {
-  SUPABASE_URL, SUPABASE_KEY, AREA_NAME, MAP_CENTER, MAP_ZOOM, HISTORY_MINUTES, LOW_BATTERY_PCT, REPLAY, RISK_BOUNDS,
-} from './config.js';
-import {
-  STATUS, REPORT_KINDS, statusLabel, waterCm, evaluate, summarize, cmToIn, replayRainfall,
-  fmtIn, fmtCm, fmtRise, fmtEta, fmtAge, fmtClock, fmtTempF, escapeHtml,
-} from './logic.js';
+import { START_VIEW, MIN_RISK_ZOOM, HISTORY_MINUTES, REPLAY } from './config.js';
+import { STATUS, evaluate, waterCm, cmToIn, fmtIn, fmtClock, replayRainfall, escapeHtml } from './logic.js';
+import * as data from './data.js';
 import { Simulator } from './sim.js';
 import { notify, browserAlertState, enableBrowserAlerts } from './notify.js';
 import { MapView } from './mapview.js';
 import { RiskEngine } from './insight.js';
-import { femaZoneAt, describeZone } from './sources.js';
-import { icon } from './icons.js';
+import { femaZoneAt, describeZone, searchPlaces, placeName } from './sources.js';
 import { welcomeHtml } from './welcome.js';
 import { loadForecastModel, forecastSensor, rainFromHourly, rainFromCurve } from './forecast.js';
+import { createAlertTracker, checkAlerts } from './alerts.js';
+import * as V from './views.js';
 
-const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const panel = document.getElementById('panel');
+
+function randomToken() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function storedToken(key) {
+  try {
+    let token = localStorage.getItem(key);
+    if (!token) {
+      token = randomToken();
+      localStorage.setItem(key, token);
+    }
+    return token;
+  } catch {
+    return randomToken();
+  }
+}
+
+function readSet(key) {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(key) || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+function persist(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function saveSet(key, set) {
+  persist(key, JSON.stringify([...set]));
+}
+
+const freshWizard = (mode = 'personal') => ({ step: 1, mode, code: '', name: '', note: '', point: null, sensorId: null });
 
 const state = {
   ready: false,
   session: null,
   profile: null,
-  view: 'public',
+  view: 'map',
   selectedId: null,
   authMode: 'signin',
+  afterAuth: null,
   sensors: [],
   readings: new Map(),
   seen: new Set(),
   lastDbReading: null,
   reports: [],
-  myReports: new Set(),
-  reportPending: false,
-  keys: new Map(),
+  cleared: readSet('floodmesh-cleared'),
+  myReports: readSet('floodmesh-my-reports'),
+  muted: readSet('floodmesh-muted'),
   evals: new Map(),
-  prevStatus: new Map(),
-  lowBattery: new Set(),
-  muted: new Set(readMuted()),
-  installPoint: null,
+  forecasts: new Map(),
   point: null,
+  pointTitle: null,
+  place: 'Edison, New Jersey',
+  placeAt: START_VIEW.center,
   sites: [],
+  wizard: freshWizard(),
   femaCache: new Map(),
   model: null,
-  forecasts: new Map(),
-  forecastWarned: new Set(),
-  iceWarned: new Set(),
   chart: null,
   chartFor: null,
   channel: null,
 };
 
-function readMuted() {
-  try {
-    return JSON.parse(localStorage.getItem('floodmesh-muted') || '[]');
-  } catch {
-    return [];
-  }
-}
+const reporterToken = storedToken('floodmesh-reporter');
+const voterToken = storedToken('floodmesh-voter');
+const tracker = createAlertTracker();
 
-function saveMuted() {
-  try {
-    localStorage.setItem('floodmesh-muted', JSON.stringify([...state.muted]));
-  } catch {
-  }
-}
-
-const field = (form, name) => {
-  const el = form.querySelector(`[name="${name}"]:checked`) || form.querySelector(`[name="${name}"]`);
-  return el ? el.value : '';
-};
 const isOfficial = () => state.profile?.role === 'official';
 const userId = () => state.session?.user?.id ?? null;
 const sensorById = (id) => state.sensors.find((s) => s.id === id);
-const latestOf = (id) => {
+
+function latestOf(id) {
   const list = state.readings.get(id);
   return list && list.length ? list[list.length - 1] : null;
-};
-const latestRealOf = (id) => {
+}
+
+function latestRealOf(id) {
   const list = state.readings.get(id) || [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
     if (!list[i].simulated && list[i].distance_mm != null) return list[i];
   }
   return null;
-};
+}
+
+function evalOf(s) {
+  let ev = state.evals.get(s.id);
+  if (!ev) {
+    ev = evaluate(s, latestOf(s.id), Date.now());
+    state.evals.set(s.id, ev);
+  }
+  return ev;
+}
+
+function activeReports() {
+  const now = Date.now();
+  return state.reports.filter((r) => Date.parse(r.expires_at) > now);
+}
+
+function distanceFt(a, b) {
+  const R = 20902231;
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(b[0] - a[0]);
+  const dLng = rad(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function ownsReport(r) {
+  return state.myReports.has(r.id) || (userId() != null && r.reporter_id === userId());
+}
+
+function femaFor(lat, lng) {
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  if (!state.femaCache.has(key)) {
+    state.femaCache.set(key, { status: 'loading' });
+    femaZoneAt(lat, lng)
+      .then((zone) => state.femaCache.set(key, { status: 'ok', text: describeZone(zone) }))
+      .catch(() => state.femaCache.set(key, { status: 'failed', text: 'The FEMA flood map service didn\'t respond. Its maps cover the United States only.' }))
+      .finally(() => fillLive());
+  }
+  return state.femaCache.get(key);
+}
 
 const map = new MapView('map', {
-  center: MAP_CENTER,
-  zoom: MAP_ZOOM,
-  onSelect: (id) => selectSensor(id),
+  center: START_VIEW.center,
+  zoom: START_VIEW.zoom,
+  onSelect: (id) => openSensor(id),
   onSiteSelect: (k) => openSite(k),
   onRiskMode: (mode) => {
     risk.setMode(mode);
-    refreshLive();
+    refresh();
   },
-  onMapClick: (latlng) => {
-    if (state.view === 'install') {
-      setInstallPoint(latlng);
-    } else if (state.view === 'report') {
-      map.setPin(latlng, true);
-    } else {
-      openPoint(latlng);
-    }
-  },
+  onViewChange: () => scheduleAnalysis(),
+  onMapClick: (latlng) => onMapClick(latlng),
+  popupContent: (r) => V.reportPopup(ctx(), r),
 });
 
-function setInstallPoint(latlng) {
-  state.installPoint = latlng;
-  map.setPin(latlng, true).off('dragend').on('dragend', (e) => {
-    state.installPoint = e.target.getLatLng();
-    fillInstallPoint();
-  });
-  fillInstallPoint();
-}
-
-const risk = new RiskEngine({ bounds: RISK_BOUNDS, center: MAP_CENTER, onUpdate: (kind) => onRiskUpdate(kind) });
+const risk = new RiskEngine({ onUpdate: (kind) => onRiskUpdate(kind) });
 
 const sim = new Simulator({
   getSensors: () => state.sensors,
-  emit: (reading) => addReading(reading),
+  getProfile: (s) => replayProfile(s),
+  emit: (r) => addReading(r),
   onChange: (kind) => onReplayChange(kind),
 });
+
+function ctx() {
+  const inView = state.sensors.filter((s) => s.lat != null && map.contains(s.lat, s.lng));
+  return {
+    state,
+    risk,
+    sim,
+    zoom: map.zoom(),
+    view: map.view(),
+    inView,
+    reportsInView: activeReports().filter((r) => map.contains(r.lat, r.lng)),
+    evalOf,
+    waterOf: waterCm,
+    isOfficial,
+    userId,
+    femaFor,
+    distanceFt,
+    ownsReport,
+    canRemoveReport: (r) => ownsReport(r) || isOfficial(),
+    browserAlerts: browserAlertState(),
+  };
+}
+
+function replayProfile(s) {
+  const info = s.lat != null ? risk.analyze(s.lat, s.lng) : null;
+  const score = info && !info.outside ? info.heavy : 0.6;
+  let hash = 0;
+  for (const ch of s.id) hash = (hash * 31 + ch.charCodeAt(0)) % 997;
+  return { peak: s.alert_depth_cm * (1.15 + 0.7 * score), center: 78 + (hash % 18), sd: 24 };
+}
 
 function addReading(r) {
   if (r.id != null && state.seen.has(r.id)) return;
@@ -127,7 +206,6 @@ function addReading(r) {
   if (!r.simulated && sim.drives(sensor)) return;
   if (r.id != null) state.seen.add(r.id);
   if (!r.simulated && (!state.lastDbReading || r.created_at > state.lastDbReading)) state.lastDbReading = r.created_at;
-
   let list = state.readings.get(r.sensor_id);
   if (!list) {
     list = [];
@@ -141,106 +219,50 @@ function addReading(r) {
   if (list.length > 1500) list.splice(0, list.length - 1500);
 }
 
-async function loadSensors() {
-  const { data, error } = await db.from('sensors').select('*').order('created_at', { ascending: true });
-  if (error) {
-    console.error('Loading sensors failed', error);
-    state.sensors = [];
-    return false;
-  }
-  state.sensors = data || [];
-  return true;
-}
-
-async function loadReadings(ids) {
-  if (!ids.length) return;
-  const since = new Date(Date.now() - HISTORY_MINUTES * 60000).toISOString();
-  const { data, error } = await db
-    .from('readings')
-    .select('*')
-    .in('sensor_id', ids)
-    .gte('created_at', since)
-    .order('created_at', { ascending: true })
-    .limit(1000);
-  if (error) console.error('Loading readings failed', error);
-  (data || []).forEach(addReading);
-
-  for (const id of ids) {
-    if (latestOf(id)) continue;
-    const { data: last } = await db
-      .from('readings')
-      .select('*')
-      .eq('sensor_id', id)
-      .order('created_at', { ascending: false })
-      .limit(1);
-    if (last && last.length) addReading(last[0]);
-  }
-}
-
 async function pollReadings() {
   const ids = state.sensors.filter((s) => !s.is_simulated && !sim.drives(s)).map((s) => s.id);
-  if (!ids.length) return;
-  let query = db.from('readings').select('*').in('sensor_id', ids).order('created_at', { ascending: true }).limit(500);
-  if (state.lastDbReading) query = query.gt('created_at', state.lastDbReading);
-  else query = query.gte('created_at', new Date(Date.now() - HISTORY_MINUTES * 60000).toISOString());
-  const { data, error } = await query;
-  if (!error) (data || []).forEach(addReading);
+  try {
+    (await data.fetchNewReadings(ids, state.lastDbReading)).forEach(addReading);
+  } catch (err) {
+    console.warn('Polling readings failed', err);
+  }
 }
 
 async function loadReports() {
-  const { data, error } = await db.from('reports').select('*').order('created_at', { ascending: false }).limit(200);
-  if (error) {
-    console.error('Loading reports failed', error);
-    return;
+  try {
+    state.reports = await data.fetchReports();
+  } catch (err) {
+    console.warn('Loading reports failed', err);
   }
-  state.reports = data || [];
 }
 
-function activeReports() {
-  const now = Date.now();
-  return state.reports.filter((r) => Date.parse(r.expires_at) > now);
-}
-
-function addReport(r) {
+function onReport(r) {
   if (state.reports.some((x) => x.id === r.id)) return;
   state.reports.unshift(r);
-  if (state.ready && !state.reportPending && !state.myReports.has(r.id)) {
-    notify({
-      title: 'New flooding report nearby',
-      body: `A resident reported a ${(REPORT_KINDS[r.kind] || 'hazard').toLowerCase()} nearby${r.note ? `: "${r.note}"` : '.'}`,
-      level: 'warning',
-    });
+  if (state.ready && !ownsReport(r) && map.contains(r.lat, r.lng)) {
+    notify({ title: 'New flooding report nearby', body: `A resident just reported a ${V.reportKind(r).toLowerCase()} in this part of the map.`, level: 'warning' });
   }
 }
 
-function subscribe() {
-  if (state.channel) db.removeChannel(state.channel);
-  state.channel = db
-    .channel('floodmesh-live')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'readings' }, (payload) => addReading(payload.new))
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'reports' }, (payload) => addReport(payload.new))
-    .subscribe();
+function onReportChange(r) {
+  const i = state.reports.findIndex((x) => x.id === r.id);
+  if (i >= 0) state.reports[i] = { ...state.reports[i], ...r };
 }
 
-async function loadProfile() {
-  state.profile = null;
-  if (!state.session) return;
-  const { data, error } = await db.from('profiles').select('*').eq('id', userId()).maybeSingle();
-  if (error) console.error('Loading profile failed', error);
-  state.profile = data || null;
+function onReportGone(r) {
+  if (r && r.id != null) state.reports = state.reports.filter((x) => x.id !== r.id);
 }
 
+let identityToken = 0;
 let loadedFor;
 let identityTask = null;
-let identityToken = 0;
 
 function onIdentityChange(force = false) {
   const uid = userId();
   if (!force && uid === loadedFor) return identityTask || Promise.resolve();
   loadedFor = uid;
   identityToken += 1;
-  const token = identityToken;
-  identityTask = loadIdentity(token);
+  identityTask = loadIdentity(identityToken);
   return identityTask;
 }
 
@@ -250,770 +272,97 @@ async function loadIdentity(token) {
   state.readings.clear();
   state.seen.clear();
   state.lastDbReading = null;
-  state.keys.clear();
-  state.prevStatus.clear();
-  state.lowBattery.clear();
-
-  await loadProfile();
+  tracker.reset();
+  try {
+    state.profile = state.session ? await data.fetchProfile(userId()) : null;
+    if (stale()) return;
+    state.sensors = await data.fetchSensors();
+    if (stale()) return;
+    (await data.fetchRecentReadings(state.sensors.filter((s) => !s.is_simulated).map((s) => s.id))).forEach(addReading);
+    if (stale()) return;
+    await loadReports();
+  } catch (err) {
+    console.error('Loading FloodMesh data failed', err);
+    notify({ title: 'Couldn\'t reach FloodMesh', body: 'The sensor data didn\'t load. Check your connection and refresh the page.', level: 'warning' });
+  }
   if (stale()) return;
-  if (!isOfficial() && (state.view === 'municipal' || state.view === 'install')) state.view = 'public';
-  await loadSensors();
-  if (stale()) return;
-  await loadReadings(state.sensors.filter((s) => !s.is_simulated).map((s) => s.id));
-  if (stale()) return;
-  await loadReports();
-  if (stale()) return;
+  if (!isOfficial() && state.view === 'network') state.view = 'map';
   sim.primeIdle();
-  subscribe();
-
-  const points = state.sensors.filter((s) => s.mode === 'street' && s.lat != null).map((s) => [s.lat, s.lng]);
-  map.fit(points);
+  data.unsubscribe(state.channel);
+  state.channel = data.subscribe({ onReading: addReading, onReport, onReportChange, onReportGone });
   updateSites();
   state.ready = true;
   renderAll();
 }
 
-let modeBeforeReplay = null;
-
 function onReplayChange(kind) {
-  if (kind === 'start') {
-    modeBeforeReplay = risk.mode;
-    risk.setMode('now');
-    map.setRiskMode('now');
-  } else if (kind === 'stop' && modeBeforeReplay) {
-    risk.setMode(modeBeforeReplay);
-    map.setRiskMode(modeBeforeReplay);
-    modeBeforeReplay = null;
-  }
-  const driven = state.sensors.filter((s) => s.mode === 'street' && (s.is_simulated || (kind === 'start' && sim.includeReal) || (kind === 'stop' && !s.is_simulated)));
-  for (const s of driven) {
-    state.forecastWarned.delete(s.id);
+  for (const s of state.sensors.filter((x) => x.mode === 'street')) {
     for (const r of state.readings.get(s.id) || []) state.seen.delete(r.id);
     state.readings.set(s.id, []);
-    state.prevStatus.delete(s.id);
+    tracker.forget(s.id);
   }
-  if (kind === 'stop') {
-    const realIds = driven.filter((s) => !s.is_simulated).map((s) => s.id);
-    loadReadings(realIds).then(() => refreshLive());
-    sim.primeIdle();
+  if (kind === 'start') {
+    state.modeBeforeReplay = risk.mode;
+    risk.setMode('now');
+    map.setRiskMode('now');
+  } else {
+    const ids = state.sensors.filter((s) => s.mode === 'street' && !s.is_simulated).map((s) => s.id);
+    data.fetchRecentReadings(ids).then((rows) => {
+      rows.forEach(addReading);
+      refresh();
+    }).catch(() => {});
+    if (state.modeBeforeReplay) {
+      risk.setMode(state.modeBeforeReplay);
+      map.setRiskMode(state.modeBeforeReplay);
+    }
   }
   renderDemo();
-  if (state.selectedId) renderPanel();
-  refreshLive();
+  if (state.view === 'sensor') renderPanel();
+  refresh();
 }
 
-function checkAlerts() {
-  if (!state.ready) return;
-  const uid = userId();
-  for (const s of state.sensors) {
-    const ev = state.evals.get(s.id);
-    if (!ev) continue;
-    const prev = state.prevStatus.get(s.id);
-    state.prevStatus.set(s.id, ev.key);
-    const owned = s.owner_id === uid && uid != null;
+let analysisTimer = null;
 
-    if (s.mode === 'personal' && owned && ev.battery != null) {
-      if (ev.battery < LOW_BATTERY_PCT && !state.lowBattery.has(s.id)) {
-        state.lowBattery.add(s.id);
-        if (prev !== undefined) {
-          notify({
-            title: `${s.name} sensor battery low`,
-            body: `The battery is down to ${Math.round(ev.battery)}%, so plug it into any USB phone charger to keep it monitoring.`,
-            level: 'warning',
-          });
-        }
-      } else if (ev.battery >= LOW_BATTERY_PCT + 5) {
-        state.lowBattery.delete(s.id);
-      }
-    }
+function scheduleAnalysis() {
+  const c = map.center();
+  if (state.place && state.placeAt && distanceFt([c.lat, c.lng], state.placeAt) > 13000) state.place = null;
+  clearTimeout(analysisTimer);
+  analysisTimer = setTimeout(() => {
+    risk.analyzeView(map.view(), map.zoom());
+    updateSites();
+    refresh();
+  }, 450);
+  fillLive();
+}
 
-    const fc = state.forecasts.get(s.id);
-    if (s.mode === 'street' && !state.muted.has(s.id) && prev !== undefined) {
-      if (fc && fc.crossMin != null && fc.crossMin <= 45 && ev.key !== 'flooding' && !state.forecastWarned.has(s.id)) {
-        state.forecastWarned.add(s.id);
-        notify({
-          title: `Flooding expected at ${s.name}`,
-          body: `The forecast model expects the water to reach ${fmtIn(s.alert_depth_cm)} in about ${Math.max(1, Math.round(fc.crossMin))} minutes, so plan a different route if you can.`,
-          level: 'warning',
-        });
-      } else if (state.forecastWarned.has(s.id) && ev.water != null && ev.water < s.alert_depth_cm * 0.3 && (!fc || fc.crossMin == null)) {
-        state.forecastWarned.delete(s.id);
-      }
-      if (ev.ice && !state.iceWarned.has(s.id)) {
-        state.iceWarned.add(s.id);
-        notify({
-          title: `Ice possible at ${s.name}`,
-          body: `The air there is ${fmtTempF(ev.temp)} and there is still water on the road, so the surface could freeze.`,
-          level: 'warning',
-        });
-      } else if (!ev.ice) {
-        state.iceWarned.delete(s.id);
-      }
-    }
-
-    if (prev === undefined || prev === 'nodata' || prev === ev.key) continue;
-    const rank = STATUS[ev.key].rank;
-    const prevRank = STATUS[prev].rank;
-
-    if (s.mode === 'street') {
-      if (!state.muted.has(s.id)) {
-        if (ev.key === 'warning' && prevRank < 2) {
-          notify({
-            title: `Water rising at ${s.name}`,
-            body: `There is ${fmtIn(ev.water)} of water on the road now, and at this rate it could become impassable in ${fmtEta(ev.etaMin) || 'the next half hour'}.`,
-            level: 'warning',
-          });
-        } else if (ev.key === 'flooding') {
-          notify({
-            title: `Flooding at ${s.name}`,
-            body: `The sensor reads ${fmtIn(ev.water)} of water above the road surface, so it's best to take another route for now.`,
-            level: 'danger',
-          });
-        } else if (prev === 'flooding' && rank >= 0) {
-          notify({
-            title: `Water dropping at ${s.name}`,
-            body: `The water has dropped back below ${fmtIn(s.alert_depth_cm)}, though there may still be debris on the road.`,
-            level: 'info',
-          });
-        }
-      }
-      if (isOfficial() && ev.key === 'offline') {
-        notify({
-          title: `${s.name} stopped reporting`,
-          body: `It hasn't sent a reading in ${fmtAge(ev.ageSec).replace(' ago', '')}, so it's worth checking the power and Wi-Fi at the site.`,
-          level: 'warning',
-        });
-      }
-    } else if (owned) {
-      if (ev.key === 'flooding') {
-        notify({
-          title: `Water detected: ${s.name}`,
-          body: `The sensor is picking up ${fmtIn(ev.water)} of standing water, which could mean a leak or a burst pipe nearby.`,
-          level: 'danger',
-        });
-      } else if (ev.key === 'offline') {
-        notify({
-          title: `${s.name} sensor is offline`,
-          body: 'It hasn\'t checked in recently, so make sure it has power and is within range of your Wi-Fi.',
-          level: 'warning',
-        });
-      } else if (prev === 'flooding') {
-        notify({ title: `${s.name} is dry again`, body: 'The sensor no longer detects standing water.', level: 'info' });
-      }
-    }
+function updateNotice() {
+  if (map.zoom() < MIN_RISK_ZOOM) {
+    map.setNotice('Zoom in to see street-level flood risk.', { label: 'Zoom in', run: () => map.goTo(map.center(), 15) });
+  } else if (risk.status === 'loading') {
+    map.setNotice('Reading the terrain for this area.');
+  } else if (risk.status === 'failed') {
+    map.setNotice('Elevation data isn\'t available for this area.');
+  } else {
+    map.setNotice('');
   }
-}
-
-function renderAll() {
-  renderTopbar();
-  renderPanel();
-  renderDemo();
-  refreshLive();
-}
-
-function renderTopbar() {
-  document.querySelectorAll('#tabs [data-view]').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.view === tabFor(state.view));
-  });
-  document.getElementById('tab-municipal').hidden = !isOfficial();
-  const account = document.getElementById('account-btn');
-  account.textContent = state.session ? (state.profile?.display_name || 'Account') : 'Sign in';
-}
-
-function tabFor(view) {
-  if (view === 'report' || view === 'point') return 'public';
-  if (view === 'install') return 'municipal';
-  return view;
-}
-
-function renderPanel() {
-  destroyChart();
-  const views = {
-    public: () => (state.selectedId ? streetDetailView() : publicListView()),
-    point: pointView,
-    report: reportView,
-    auth: authView,
-    account: accountView,
-    home: homeView,
-    municipal: municipalView,
-    install: installView,
-  };
-  panel.innerHTML = (views[state.view] || publicListView)();
-  panel.scrollTop = 0;
-  panel.classList.remove('enter');
-  void panel.offsetWidth;
-  panel.classList.add('enter');
-  const sensor = state.selectedId && sensorById(state.selectedId);
-  if (sensor && panel.querySelector('#chart')) mountChart(sensor);
-}
-
-function publicListView() {
-  return `
-    <header class="panel-head">
-      <h1>Street flood conditions</h1>
-      <p class="muted">${escapeHtml(AREA_NAME)}</p>
-    </header>
-    <div data-live="area"></div>
-    <p class="hint">${icon('target')}<span>Click anywhere on the map to see the flood risk at that spot and what's behind it.</span></p>
-    <section class="section tight">
-      <div class="section-head"><h2>Street sensors</h2></div>
-      <p class="summary" data-live="summary"></p>
-      <div class="sensor-list" data-live="street-list"></div>
-    </section>
-    <section class="section">
-      <div class="section-head">
-        <h2>Community reports</h2>
-        <button class="btn btn-secondary btn-small" data-action="report-start">Report flooding</button>
-      </div>
-      <div data-live="report-list"></div>
-    </section>
-    <section class="section">
-      <div class="section-head"><h2>Where sensors are needed next</h2></div>
-      <p class="muted small">These are low spots on local roads that don't have a sensor nearby yet, ranked by how easily water collects there.</p>
-      <div data-live="sites"></div>
-    </section>
-    ${footer()}`;
-}
-
-function footer(kind = 'street') {
-  const note = kind === 'home'
-    ? 'Home alerts are meant as an early heads-up and don\'t replace a monitored alarm system or a plumber\'s inspection.'
-    : 'FloodMesh readings are meant to help you plan and don\'t replace official warnings from Edison Township, Middlesex County, or the National Weather Service.';
-  return `
-    <footer class="panel-foot">
-      <p>${note}</p>
-      <button class="link-btn" data-action="demo-toggle">Demo controls</button>
-    </footer>`;
-}
-
-function streetDetailView() {
-  const s = sensorById(state.selectedId);
-  if (!s) return publicListView();
-  return `
-    <button class="back" data-action="back">All sensors</button>
-    <header class="detail-head">
-      <h1>${escapeHtml(s.name)}</h1>
-      <p class="muted">${escapeHtml(s.location_note || '')}</p>
-    </header>
-    <div data-live="stats"></div>
-    <div class="chart-wrap"><canvas id="chart" aria-label="Water level over the last hour"></canvas></div>
-    <div data-live="detail-actions"></div>
-    <div data-live="model-info"></div>
-    <section class="section">
-      <h2>Why this spot floods</h2>
-      <div data-live="site-profile"></div>
-    </section>
-    <p class="fine">${s.is_simulated ? 'This is a simulated sensor that shows how the network behaves. ' : ''}Depth is measured from the road surface directly below the sensor, and the road counts as impassable at ${fmtIn(s.alert_depth_cm)} because moving water that deep can stall most cars.</p>
-    ${footer()}`;
-}
-
-function reportView() {
-  const options = Object.entries(REPORT_KINDS)
-    .map(([value, label], i) => `<label class="radio"><input type="radio" name="kind" value="${value}" ${i === 0 ? 'checked' : ''}> ${label}</label>`)
-    .join('');
-  return `
-    <button class="back" data-action="back">Cancel</button>
-    <header class="detail-head">
-      <h1>Report flooding</h1>
-      <p class="muted">Drag the pin to where you saw the problem. Your report stays on the map for four hours and is marked as unverified so people know it came from a resident.</p>
-    </header>
-    <form data-form="report" class="form">
-      <fieldset>
-        <legend>What did you see?</legend>
-        ${options}
-      </fieldset>
-      <label>Details (optional)
-        <textarea name="note" rows="3" maxlength="280" placeholder="Water covering both lanes at the bottom of the hill"></textarea>
-      </label>
-      <button type="submit" class="btn">Submit report</button>
-    </form>
-    <div data-live="message"></div>`;
-}
-
-function authView() {
-  const signin = state.authMode === 'signin';
-  return `
-    <header class="detail-head">
-      <h1>${signin ? 'Sign in' : 'Create an account'}</h1>
-      <p class="muted">${signin
-        ? 'Residents sign in to keep track of the sensors in their homes, and municipal staff can install street sensors once their account has been verified with the township.'
-        : 'Anyone can create a resident account and connect a home sensor, while street sensors are limited to verified municipal accounts.'}</p>
-    </header>
-    <form data-form="auth" class="form">
-      ${signin ? '' : '<label>Name<input name="name" required maxlength="60" autocomplete="name"></label>'}
-      <label>Email<input type="email" name="email" required autocomplete="email"></label>
-      <label>Password<input type="password" name="password" required minlength="6" autocomplete="${signin ? 'current-password' : 'new-password'}"></label>
-      <button type="submit" class="btn">${signin ? 'Sign in' : 'Create account'}</button>
-    </form>
-    <div data-live="message"></div>
-    <p class="switch">${signin ? 'New to FloodMesh?' : 'Already have an account?'}
-      <button class="link-btn" data-action="auth-toggle">${signin ? 'Create an account' : 'Sign in instead'}</button></p>`;
-}
-
-function accountView() {
-  if (!state.session) return authView();
-  const alerts = browserAlertState();
-  const alertLine = {
-    granted: 'Browser notifications are on.',
-    denied: 'Browser notifications are blocked in your browser settings.',
-    default: '',
-    unsupported: 'This browser does not support notifications.',
-  }[alerts];
-  return `
-    <header class="detail-head">
-      <h1>${escapeHtml(state.profile?.display_name || 'Your account')}</h1>
-      <p class="muted">${escapeHtml(state.session.user.email)}</p>
-    </header>
-    <dl class="facts">
-      <dt>Account type</dt>
-      <dd>${isOfficial() ? 'Verified municipal account' : 'Resident account'}</dd>
-    </dl>
-    <section class="section">
-      <h2>Alerts</h2>
-      <p>Alerts show up inside FloodMesh while it's open, and background push notifications are planned for the mobile version.</p>
-      ${alerts === 'default' ? '<button class="btn btn-secondary" data-action="alerts-enable">Also show browser notifications</button>' : `<p class="muted">${alertLine}</p>`}
-    </section>
-    <section class="section">
-      <button class="btn btn-secondary" data-action="signout">Sign out</button>
-    </section>
-    ${footer()}`;
-}
-
-function homeView() {
-  if (!state.session) {
-    return `
-      <header class="detail-head">
-        <h1>Home sensors</h1>
-        <p class="muted">A FloodMesh sensor in a basement or low room sends an alert to your phone as soon as standing water shows up, so a burst pipe or seepage gets caught early. It runs on a rechargeable battery and keeps working through power outages.</p>
-      </header>
-      <button class="btn" data-action="goto" data-view="auth">Sign in</button>
-      <p class="switch">No account yet? <button class="link-btn" data-action="auth-create">Create one</button></p>`;
-  }
-  const s = state.selectedId && sensorById(state.selectedId);
-  if (s && s.mode === 'personal') return homeDetailView(s);
-  return `
-    <header class="detail-head">
-      <h1>Home sensors</h1>
-      <p class="muted">Only you can see these sensors, and they never show up on the public map.</p>
-    </header>
-    <div class="sensor-list" data-live="home-list"></div>
-    <section class="section">
-      <h2>Add a sensor</h2>
-      <form data-form="add-personal" class="form">
-        <label>Name<input name="name" required maxlength="60" placeholder="Basement"></label>
-        <label>Where is it installed?<input name="note" maxlength="120" placeholder="Next to the water heater"></label>
-        <button type="submit" class="btn">Add sensor</button>
-      </form>
-      <div data-live="message"></div>
-    </section>
-    ${footer('home')}`;
-}
-
-function homeDetailView(s) {
-  return `
-    <button class="back" data-action="back">All home sensors</button>
-    <header class="detail-head">
-      <h1>${escapeHtml(s.name)}</h1>
-      <p class="muted">${escapeHtml(s.location_note || '')}</p>
-    </header>
-    <div data-live="stats"></div>
-    <div class="chart-wrap"><canvas id="chart" aria-label="Water on the floor over time"></canvas></div>
-    ${sensorSettings(s, 'floor')}
-    <p class="fine">${s.is_simulated ? 'This demo unit uses simulated readings. ' : ''}A real sensor recharges from any USB phone charger and keeps monitoring through a power outage.</p>
-    ${footer('home')}`;
-}
-
-function sensorSettings(s, surface) {
-  const surfaceWord = surface === 'floor' ? 'floor' : 'road surface';
-  return `
-    <section class="section">
-      <h2>Calibration</h2>
-      <p>Mount the sensor where it will stay, make sure the ${surfaceWord} below it is dry, then save the current reading as the dry level. Current dry level: ${fmtIn(s.mount_height_cm)} below the sensor.</p>
-      <button class="btn btn-secondary" data-action="calibrate" data-id="${s.id}" ${s.is_simulated ? 'disabled' : ''}>Save current reading as dry ${surfaceWord}</button>
-      <form data-form="alert-depth" data-id="${s.id}" class="form inline-form">
-        <label>${surface === 'floor' ? 'Alert me when water reaches' : 'Mark road impassable at'}
-          <span class="input-unit"><input name="depth" type="number" min="0.2" max="60" step="0.1" value="${cmToIn(s.alert_depth_cm).toFixed(1)}" required> in</span>
-        </label>
-        <button type="submit" class="btn btn-secondary">Save</button>
-      </form>
-      <div data-live="message"></div>
-    </section>
-    <section class="section">
-      <h2>Device setup</h2>
-      <p>Each sensor has a private key that lets it send readings to your account.</p>
-      <button class="btn btn-secondary" data-action="show-key" data-id="${s.id}">Show device key</button>
-      <div data-live="key"></div>
-    </section>`;
-}
-
-function municipalView() {
-  if (!isOfficial()) {
-    return `
-      <header class="detail-head">
-        <h1>Municipal tools</h1>
-        <p class="muted">Installing and managing street sensors requires a verified municipal account.</p>
-      </header>`;
-  }
-  const s = state.selectedId && sensorById(state.selectedId);
-  if (s && s.mode === 'street') {
-    return `
-      <button class="back" data-action="back">Sensor network</button>
-      <header class="detail-head">
-        <h1>${escapeHtml(s.name)}</h1>
-        <p class="muted">${escapeHtml(s.location_note || '')}</p>
-      </header>
-      <div data-live="stats"></div>
-      <div class="chart-wrap"><canvas id="chart" aria-label="Water level over the last hour"></canvas></div>
-      <section class="section">
-        <h2>Why this spot floods</h2>
-        <div data-live="site-profile"></div>
-      </section>
-      ${s.owner_id === userId() ? sensorSettings(s, 'road') : '<p class="muted">This sensor is managed by another municipal account.</p>'}`;
-  }
-  return `
-    <header class="detail-head">
-      <h1>Street sensor network</h1>
-      <p class="muted">${escapeHtml(AREA_NAME)}</p>
-    </header>
-    <div data-live="health"></div>
-    <section class="section">
-      <h2>Recommended sites</h2>
-      <p class="muted small">These are ranked using elevation, drainage, and road data, and each one is at least 850 ft from an existing sensor.</p>
-      <div data-live="sites"></div>
-    </section>
-    <section class="section">
-      <h2>Install a sensor somewhere else</h2>
-      <p>You can also pick any spot on the map, enter the mounting details, and get a device key for the sensor's firmware.</p>
-      <button class="btn btn-secondary" data-action="install-start">Place a new sensor</button>
-    </section>`;
-}
-
-function installView() {
-  return `
-    <button class="back" data-action="back">Cancel</button>
-    <header class="detail-head">
-      <h1>Place a new sensor</h1>
-      <p class="muted">Click the map where the sensor will be mounted, then drag the pin if you need to adjust it.</p>
-    </header>
-    <p class="install-point" data-live="install-point"></p>
-    <form data-form="install" class="form">
-      <label>Site name<input name="name" required maxlength="60" placeholder="Grove Ave underpass"></label>
-      <label>Location details<input name="note" maxlength="120" placeholder="North side, on the retaining wall"></label>
-      <label>Height of sensor above the road
-        <span class="input-unit"><input name="mount" type="number" min="10" max="450" step="1" value="100" required> cm</span>
-      </label>
-      <label>Mark road impassable at
-        <span class="input-unit"><input name="depth" type="number" min="0.5" max="60" step="0.5" value="6" required> in</span>
-      </label>
-      <button type="submit" class="btn">Create sensor</button>
-    </form>
-    <div data-live="message"></div>`;
 }
 
 function onRiskUpdate(kind) {
   if (kind === 'terrain' || kind === 'roads') updateSites();
-  if (kind === 'terrain' && risk.terrainStatus === 'failed') map.setRiskStatus('The elevation data couldn\'t load, so the map is showing sensors and reports only.');
-  if (kind === 'terrain' && risk.ready) map.setRiskStatus('');
-  refreshLive();
+  updateNotice();
+  refresh();
 }
 
 function updateSites() {
-  state.sites = risk.sites(state.sensors.filter((s) => s.mode === 'street'));
-  map.setSites(state.sites);
-}
-
-const OBS_STRENGTH = { flooding: 1, warning: 0.7, rising: 0.4 };
-
-function observationPoints() {
-  const points = [];
-  for (const s of state.sensors) {
-    if (s.mode !== 'street' || s.lat == null) continue;
-    const ev = state.evals.get(s.id);
-    const strength = ev && OBS_STRENGTH[ev.key];
-    if (strength) points.push({ lat: s.lat, lng: s.lng, strength });
-  }
-  for (const r of activeReports()) points.push({ lat: r.lat, lng: r.lng, strength: 0.6 });
-  return points;
-}
-
-function feet(n) {
-  return `${Math.round(n).toLocaleString()} ft`;
-}
-
-function distanceFt(a, b) {
-  const R = 20902231;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(b[0] - a[0]);
-  const dLng = toRad(b[1] - a[1]);
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
-}
-
-function rainLine() {
-  if (sim.running) return `The replay storm is dropping ${sim.rainfall().toFixed(1)} in of rain per hour.`;
-  const w = risk.weather;
-  if (!w) return 'Loading the National Weather Service forecast...';
-  if (w.error) return 'The weather forecast isn\'t available right now.';
-  const parts = [];
-  if (w.summary) parts.push(`${w.summary}${w.tempF != null ? `, ${w.tempF}°F` : ''}.`);
-  if (w.rainChance != null && w.rain24In != null) parts.push(`There's a ${w.rainChance}% chance of rain in the next 6 hours, with ${w.rain24In < 0.05 ? 'under 0.1' : w.rain24In.toFixed(1)} in expected over the next day.`);
-  else if (w.rainChance != null) parts.push(`There's a ${w.rainChance}% chance of rain in the next 6 hours.`);
-  return parts.join(' ');
-}
-
-function sensorLevel() {
-  const keys = state.sensors.filter((s) => s.mode === 'street').map((s) => state.evals.get(s.id)?.key);
-  if (keys.includes('flooding')) return 'severe';
-  if (keys.includes('warning')) return 'high';
-  if (keys.includes('rising')) return 'moderate';
-  return 'low';
-}
-
-function areaHtml() {
-  const area = risk.areaLevel();
-  const order = ['low', 'moderate', 'high', 'severe'];
-  const fromSensors = sensorLevel();
-  let level = area ? area.level : null;
-  if (!level || order.indexOf(fromSensors) > order.indexOf(level.key)) {
-    level = { low: { label: 'Low', color: '#2f7d4f' }, moderate: { label: 'Moderate', color: '#a87a00' }, high: { label: 'High', color: '#d0610b' }, severe: { label: 'Severe', color: '#c0392b' } }[fromSensors];
-  }
-  const flooding = state.sensors.filter((s) => s.mode === 'street' && state.evals.get(s.id)?.key === 'flooding').map((s) => s.name);
-  const w = risk.weather;
-  let reason;
-  if (flooding.length) reason = `Sensors are picking up water over the road at ${flooding.join(' and ')}.`;
-  else if (sim.running) reason = 'The replay storm is dropping heavy rain, and low spots like the bottom of the Mt. Pleasant Ave hill fill up first.';
-  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.5) reason = 'Steady rain is in the forecast, so low spots may start collecting water over the next day.';
-  else if (w && !w.error && w.rain24In != null && w.rain24In >= 0.05) reason = 'A little rain is in the forecast, but it isn\'t enough to flood the streets.';
-  else if (w && !w.error) reason = 'There\'s no meaningful rain in the forecast, and none of the sensors are picking up water on the road.';
-  else reason = 'This is based on the sensor readings and the terrain, since the forecast isn\'t available.';
-  const alerts = w && !w.error && w.alerts.length
-    ? `<div class="nws-alert">${icon('info')}<div><strong>${escapeHtml(w.alerts.map((a) => a.event).join(', '))}</strong><span>Issued by the National Weather Service for this area.</span></div></div>`
-    : '';
-  return `
-    <section class="area-card" style="--c:${level.color}">
-      <span class="area-label">Flood risk in this area right now</span>
-      <span class="area-level">${level.label}</span>
-      <p class="area-reason">${reason}</p>
-      <p class="weather-line">${icon('rain')}<span>${escapeHtml(rainLine())}</span></p>
-      ${alerts}
-    </section>`;
-}
-
-function sparkline(sensor) {
-  const list = state.readings.get(sensor.id) || [];
-  const pts = list.slice(-60).map((r) => waterCm(sensor, r) ?? 0);
-  if (pts.length < 2) return '<svg class="spark" viewBox="0 0 80 24" aria-hidden="true"></svg>';
-  const max = Math.max(sensor.alert_depth_cm, ...pts) || 1;
-  const step = 80 / (pts.length - 1);
-  const line = pts.map((v, k) => `${(k * step).toFixed(1)},${(22 - (v / max) * 20).toFixed(1)}`).join(' ');
-  const alertY = (22 - (sensor.alert_depth_cm / max) * 20).toFixed(1);
-  return `<svg class="spark" viewBox="0 0 80 24" aria-hidden="true"><line x1="0" x2="80" y1="${alertY}" y2="${alertY}" class="spark-alert"/><polyline points="${line}" class="spark-line"/></svg>`;
-}
-
-function femaFor(lat, lng) {
-  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
-  if (!state.femaCache.has(key)) {
-    state.femaCache.set(key, { status: 'loading' });
-    femaZoneAt(lat, lng)
-      .then((zone) => state.femaCache.set(key, { status: 'ok', text: describeZone(zone) }))
-      .catch(() => state.femaCache.set(key, { status: 'failed', text: 'FEMA flood map service did not respond' }))
-      .finally(() => fillLive());
-  }
-  return state.femaCache.get(key);
-}
-
-function factorRows(lat, lng, info, { skipSensorId = null } = {}) {
-  const rows = [];
-  const add = (ic, title, text) => rows.push(`<li>${icon(ic)}<div><strong>${title}</strong><span>${text}</span></div></li>`);
-  if (info && !info.outside) {
-    const rel = (ft, radius) => (ft >= 1 ? `${Math.round(ft)} ft lower than` : ft <= -1 ? `${Math.round(-ft)} ft higher than` : 'about level with')
-      + ` the ground within ${feet(Math.round(radius / 50) * 50)}`;
-    add('mountain', `Elevation ${Math.round(info.elevFt)} ft`, `${rel(info.localFt, info.localRadiusFt)}, and ${rel(info.broadFt, info.broadRadiusFt)}.`);
-    add('wave', 'Drainage', info.acres >= 0.5
-      ? `Runoff from about ${info.acres >= 10 ? Math.round(info.acres) : info.acres.toFixed(1)} acres of surrounding land flows through this spot.`
-      : 'Very little runoff flows here, since water tends to drain away from this spot.');
-    add('drain', 'Ponding', info.pondFt >= 0.3
-      ? `Sits in a dip that could hold about ${info.pondFt.toFixed(1)} ft of standing water if storm drains back up.`
-      : 'Not in a closed dip, so water has a way to drain off.');
-  }
-  const fema = femaFor(lat, lng);
-  add('shield', 'FEMA flood map', fema.status === 'loading' ? 'Checking the National Flood Hazard Layer...' : escapeHtml(fema.text));
-  add('rain', 'Weather', escapeHtml(rainLine()));
-  const street = state.sensors.filter((s) => s.mode === 'street' && s.lat != null && s.id !== skipSensorId);
-  if (street.length) {
-    const nearest = street
-      .map((s) => ({ s, d: distanceFt([lat, lng], [s.lat, s.lng]) }))
-      .sort((a, b) => a.d - b.d)[0];
-    const ev = state.evals.get(nearest.s.id);
-    add('sensor', 'Nearest other sensor', `${escapeHtml(nearest.s.name)}, ${feet(nearest.d)} away, ${ev ? STATUS[ev.key].label.toLowerCase() : 'no data'}${ev && ev.water != null && ev.key !== 'offline' ? ` at ${fmtIn(ev.water)}` : ''}.`);
-  }
-  const near = activeReports().filter((r) => distanceFt([lat, lng], [r.lat, r.lng]) <= 1000);
-  add('pin', 'Community reports', near.length ? `${near.length} active report${near.length > 1 ? 's' : ''} within 1,000 ft.` : 'None within 1,000 ft.');
-  return `<ul class="factors">${rows.join('')}</ul>`;
-}
-
-function openPoint(latlng) {
-  state.view = 'point';
-  state.selectedId = null;
-  state.point = [latlng.lat, latlng.lng];
-  state.pointTitle = null;
-  map.setPin(latlng, false);
-  renderAll();
-}
-
-function openSite(k) {
-  const site = state.sites[k];
-  if (!site) return;
-  state.view = 'point';
-  state.selectedId = null;
-  state.point = [site.lat, site.lng];
-  state.pointTitle = `Recommended site ${k + 1}${site.road ? `: ${site.road}` : ''}`;
-  map.setPin(L.latLng(site.lat, site.lng), false);
-  map.focus([site.lat, site.lng]);
-  renderAll();
-}
-
-function pointView() {
-  const [lat, lng] = state.point;
-  return `
-    <button class="back" data-action="point-back">Back to the map</button>
-    <header class="detail-head">
-      <h1>${escapeHtml(state.pointTitle || 'Flood risk at this spot')}</h1>
-      <p class="muted mono">${lat.toFixed(5)}, ${lng.toFixed(5)}</p>
-    </header>
-    <div data-live="point"></div>
-    <div class="point-actions">
-      <button class="btn btn-secondary" data-action="report-here">Report flooding here</button>
-      ${isOfficial() ? '<button class="btn" data-action="install-here">Install a sensor here</button>' : ''}
-    </div>
-    ${footer()}`;
-}
-
-function pointHtml() {
-  const [lat, lng] = state.point;
-  const info = risk.analyze(lat, lng);
-  let head = '';
-  if (!risk.ready) {
-    head = `<p class="muted">${risk.terrainStatus === 'failed' ? 'The elevation data couldn\'t load, so only nearby readings are shown.' : 'Loading elevation data...'}</p>`;
-  } else if (info.outside) {
-    head = '<p class="muted">This spot is outside the area FloodMesh has analyzed, which covers about a mile around the pilot sensors.</p>';
-  } else {
-    const rankText = rankSentence(info);
-    head = `
-      <div class="risk-pair">
-        <div style="--c:${info.levelNow.color}"><span class="readout-label">Right now</span><span class="risk-word">${info.levelNow.label}</span></div>
-        <div style="--c:${info.levelHeavy.color}"><span class="readout-label">During heavy rain</span><span class="risk-word">${info.levelHeavy.label}</span></div>
-      </div>
-      <p class="rank-line">${rankText}</p>`;
-  }
-  return `${head}<h2 class="factor-head">What goes into this</h2>${factorRows(lat, lng, info && !info.outside ? info : null)}
-    <p class="fine">The terrain analysis uses USGS 3DEP elevation at about 50 ft resolution to estimate where water collects, so treat it as a guide rather than an official flood determination.</p>`;
-}
-
-function topShare(rank) {
-  const pct = Math.max(1, Math.ceil((1 - rank) * 100));
-  return `Top ${pct}%`;
-}
-
-function rankSentence(info) {
-  const where = info.rankAgainstRoads ? 'road spots' : 'spots';
-  if (info.rank >= 0.99) return `One of the most flood-prone ${where} in the analyzed area (top 1%).`;
-  if (info.rank >= 0.5) return `More flood-prone than ${Math.round(info.rank * 100)}% of ${where} in the analyzed area.`;
-  return `Less flood-prone than ${Math.round((1 - info.rank) * 100)}% of ${where} in the analyzed area.`;
-}
-
-function modelInfoHtml() {
-  const m = state.model;
-  if (!m) return '';
-  const years = m.years[1] - m.years[0] + 1;
-  const imp = m.metrics.improvement_vs_trend_60;
-  const result = imp != null && imp > 0
-    ? `When tested on ${m.metrics.test_period}, a year it never saw during training, its one-hour predictions were ${Math.round(imp * 100)}% closer to what actually happened than simply assuming the current trend would continue.`
-    : `When tested on ${m.metrics.test_period}, it did not beat the simpler approach of assuming the current trend continues, so treat its numbers as a rough guide.`;
-  return `
-    <section class="section model-card">
-      <h2>${icon('chart')}About the forecast</h2>
-      <p>The 30 and 60 minute forecasts come from a small neural network trained on ${years} years of 15-minute water level readings from the USGS gauge on ${escapeHtml(m.site.name)} (site ${escapeHtml(m.site.id)}), paired with hourly rainfall for the same spot. ${result}</p>
-      <p class="fine">There is no public record of street-level flooding to train on yet, so the model learned how a nearby stream responds to rain and applies that pattern to this sensor, scaled to its flooding line. It will be retrained on FloodMesh's own readings once the sensors have logged a season of storms.</p>
-    </section>`;
-}
-
-function siteProfileHtml(s) {
-  if (s.lat == null) return '';
-  const info = risk.analyze(s.lat, s.lng);
-  const head = info && !info.outside
-    ? `<p>Terrain flood risk here: <strong style="color:${info.levelHeavy.color}">${info.levelHeavy.label}</strong> during heavy rain. ${rankSentence(info)}</p>`
-    : `<p class="muted">${risk.terrainStatus === 'failed' ? 'Elevation data unavailable.' : 'Loading elevation data...'}</p>`;
-  return head + factorRows(s.lat, s.lng, info && !info.outside ? info : null, { skipSensorId: s.id });
-}
-
-function sitesHtml() {
-  if (!risk.ready) return `<p class="muted">${risk.terrainStatus === 'failed' ? 'Ranking sites needs elevation data, which couldn\'t load.' : 'Ranking locations from elevation data...'}</p>`;
-  if (!state.sites.length) return '<p class="muted">Every low spot in the analyzed area is already within range of a sensor.</p>';
-  return `<ol class="site-list">${state.sites.map((site, k) => `
-    <li>
-      <span class="site-marker small"><span>${k + 1}</span></span>
-      <div class="site-text">
-        <strong>${escapeHtml(site.road || 'Unnamed location')}</strong>
-        <span>${topShare(site.rank)} of road spots for flood risk. Runoff from about ${site.acres >= 10 ? Math.round(site.acres) : site.acres.toFixed(1)} acres drains here.</span>
-        <div class="site-actions">
-          <button class="link-btn" data-action="site" data-k="${k}">View details</button>
-          ${isOfficial() ? `<button class="link-btn" data-action="install-site" data-k="${k}">Install here</button>` : ''}
-        </div>
-      </div>
-    </li>`).join('')}</ol>`;
-}
-
-function showWelcome(scrollToHow = false) {
-  const el = document.getElementById('welcome');
-  el.innerHTML = welcomeHtml();
-  el.hidden = false;
-  document.body.classList.add('welcome-open');
-  el.scrollTop = 0;
-  const how = el.querySelector('#how-it-works');
-  if (scrollToHow && how && how.scrollIntoView) how.scrollIntoView();
-  const items = el.querySelectorAll('.reveal');
-  if ('IntersectionObserver' in window) {
-    const seen = new IntersectionObserver((entries) => {
-      entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('visible');
-          seen.unobserve(entry.target);
-        }
-      });
-    }, { root: el, threshold: 0.15 });
-    items.forEach((item) => seen.observe(item));
-  } else {
-    items.forEach((item) => item.classList.add('visible'));
-  }
-}
-
-function hideWelcome(go) {
-  const el = document.getElementById('welcome');
-  el.hidden = true;
-  document.body.classList.remove('welcome-open');
-  try {
-    localStorage.setItem('floodmesh-welcomed', '1');
-  } catch {
-  }
-  if (go === 'auth') {
-    state.authMode = 'signin';
-    goTo('auth');
-  } else if (go === 'home') {
-    goTo('home');
-  } else {
-    goTo('public');
-  }
-  map.resize();
+  state.sites = risk.sites(map.view(), state.sensors.filter((s) => s.mode === 'street'));
+  map.setSites(map.zoom() >= MIN_RISK_ZOOM ? state.sites : []);
 }
 
 function rainInputs(sensor) {
   if (sim.drives(sensor)) return rainFromCurve(replayRainfall, sim.minute());
-  const hourly = rainFromHourly(risk.hourlyRain);
+  const hourly = risk.weather && !risk.weather.error ? rainFromHourly(risk.weather.hourly) : null;
   if (hourly) return hourly;
-  const w = risk.weather;
-  const next = w && !w.error && w.rain6In != null ? (w.rain6In / 6) * 25.4 : 0;
-  return { past1: 0, past3: 0, past6: 0, next1: next };
+  return { past1: 0, past3: 0, past6: 0, next1: 0 };
 }
 
 function updateForecasts() {
@@ -1023,191 +372,160 @@ function updateForecasts() {
     if (s.mode !== 'street') continue;
     const ev = state.evals.get(s.id);
     if (!ev || ev.key === 'offline' || ev.key === 'nodata') continue;
-    const list = state.readings.get(s.id) || [];
-    const fc = forecastSensor(state.model, s, list.slice(-400), rainInputs(s));
+    const fc = forecastSensor(state.model, s, (state.readings.get(s.id) || []).slice(-400), rainInputs(s));
     if (fc) state.forecasts.set(s.id, fc);
   }
 }
 
-function refreshLive() {
+const OBS_STRENGTH = { flooding: 1, warning: 0.7, rising: 0.4 };
+
+function observations() {
+  const points = [];
+  for (const s of state.sensors) {
+    if (s.mode !== 'street' || s.lat == null) continue;
+    const strength = OBS_STRENGTH[state.evals.get(s.id)?.key];
+    if (strength) points.push({ lat: s.lat, lng: s.lng, strength });
+  }
+  for (const r of activeReports()) points.push({ lat: r.lat, lng: r.lng, strength: 0.6 });
+  return points;
+}
+
+function refresh() {
   const now = Date.now();
   state.evals = new Map(state.sensors.map((s) => [s.id, evaluate(s, latestOf(s.id), now)]));
   updateForecasts();
   map.setSensors(state.sensors.filter((s) => s.mode === 'street'), state.evals, state.selectedId);
   map.setReports(activeReports());
   risk.replayRain = sim.running ? sim.rainfall() : null;
-  risk.setObservations(observationPoints());
-  const image = risk.render();
-  if (image) map.setRiskImage(image.url, image.bounds);
+  risk.setObservations(observations());
+  if (risk.status === 'zoom' || risk.status === 'failed') {
+    map.setRiskImage(null);
+  } else {
+    const image = risk.render();
+    if (image) map.setRiskImage(image.url, image.bounds);
+  }
+  updateNotice();
   fillLive();
   renderReplayStatus();
-  checkAlerts();
-}
-
-function live(name) {
-  return panel.querySelector(`[data-live="${name}"]`);
-}
-
-function evalOf(s) {
-  let ev = state.evals.get(s.id);
-  if (!ev) {
-    ev = evaluate(s, latestOf(s.id), Date.now());
-    state.evals.set(s.id, ev);
+  if (state.ready) {
+    checkAlerts({
+      sensors: state.sensors,
+      evals: state.evals,
+      forecasts: state.forecasts,
+      muted: state.muted,
+      uid: userId(),
+      official: isOfficial(),
+      tracker,
+      notify,
+    });
   }
-  return ev;
+}
+
+function fill(name, html) {
+  const el = panel.querySelector(`[data-live="${name}"]`);
+  if (!el || el.__html === html) return;
+  el.innerHTML = html;
+  el.__html = html;
 }
 
 function fillLive() {
-  const items = state.sensors.map((s) => ({ sensor: s, ev: evalOf(s) }));
-  const street = items.filter((i) => i.sensor.mode === 'street');
-
-  const summary = live('summary');
-  if (summary) summary.textContent = state.ready ? summarize(items) : 'Loading sensors...';
-
-  const area = live('area');
-  if (area) area.innerHTML = areaHtml();
-
-  const sites = live('sites');
-  if (sites) sites.innerHTML = sitesHtml();
-
-  const point = live('point');
-  if (point && state.point) point.innerHTML = pointHtml();
-
-  const list = live('street-list');
-  if (list) list.innerHTML = street.map(sensorRow).join('') || '<p class="muted">No street sensors yet.</p>';
-
-  const reports = live('report-list');
-  if (reports) {
-    const active = activeReports();
-    reports.innerHTML = active.length
-      ? active.map((r) => `
-          <button class="report-row" data-action="focus-report" data-id="${r.id}">
-            <span class="report-kind">${escapeHtml(REPORT_KINDS[r.kind] || 'Report')}</span>
-            <span class="report-meta">${fmtAge((Date.now() - Date.parse(r.created_at)) / 1000)}${r.note ? `, "${escapeHtml(r.note)}"` : ''}</span>
-          </button>`).join('')
-      : '<p class="muted">There aren\'t any active reports right now. If you see water on a road, report it so other drivers can steer clear.</p>';
+  const c = ctx();
+  const s = state.selectedId ? sensorById(state.selectedId) : null;
+  switch (state.view) {
+    case 'map':
+      fill('place', V.placeLine(c));
+      fill('area', V.areaBlock(c));
+      fill('sensor-count', V.sensorCount(c));
+      fill('summary', V.summaryLine(c));
+      fill('street-list', V.streetList(c));
+      fill('report-list', V.reportList(c));
+      fill('sites', V.siteList(c));
+      break;
+    case 'point':
+      if (state.point) fill('point', V.pointBody(c));
+      break;
+    case 'sensor':
+      if (!s) break;
+      fill('stats', V.statsBlock(c, s));
+      fill('model-note', s.mode === 'street' ? V.modelNote(c) : '');
+      fill('site-profile', V.siteProfile(c, s));
+      fill('mute', V.muteLine(c, s));
+      updateChart(s);
+      break;
+    case 'mine':
+      fill('mine', V.mineList(c));
+      break;
+    case 'network':
+      fill('health', V.healthTable(c));
+      fill('sites', V.siteList(c));
+      fill('report-list', V.reportList(c));
+      break;
+    case 'add':
+      if (state.wizard.step === 3) {
+        const ws = sensorById(state.wizard.sensorId);
+        fill('calibrate', V.calibrateBody(c, ws, ws ? latestRealOf(ws.id) : null));
+      }
+      break;
+    default:
+      break;
   }
-
-  const home = live('home-list');
-  if (home) {
-    const mine = items.filter((i) => i.sensor.mode === 'personal' && i.sensor.owner_id === userId());
-    home.innerHTML = mine.map(sensorRow).join('') || '<p class="muted">You haven\'t added a home sensor yet, but you can add one below.</p>';
-  }
-
-  const health = live('health');
-  if (health) health.innerHTML = healthTable(street);
-
-  const s = state.selectedId && sensorById(state.selectedId);
-  const stats = live('stats');
-  if (s && stats) stats.innerHTML = statsHtml(s, evalOf(s));
-
-  const profile = live('site-profile');
-  if (s && profile) profile.innerHTML = siteProfileHtml(s);
-
-  const modelInfo = live('model-info');
-  if (s && modelInfo) modelInfo.innerHTML = modelInfoHtml();
-
-  const actions = live('detail-actions');
-  if (s && actions) {
-    const muted = state.muted.has(s.id);
-    actions.innerHTML = `<button class="btn btn-secondary" data-action="mute" data-id="${s.id}">${muted ? 'Turn on alerts for this sensor' : 'Turn off alerts for this sensor'}</button>`;
-  }
-
-  if (s) updateChart(s);
-}
-
-function sensorRow({ sensor: s, ev }) {
-  const color = STATUS[ev.key].color;
-  const value = ev.key === 'offline' || ev.key === 'nodata' ? (ev.ageSec != null ? `Last seen ${fmtAge(ev.ageSec)}` : '') : fmtIn(ev.water);
-  return `
-    <button class="sensor-row" style="--c:${color}" data-action="select" data-id="${s.id}">
-      <span class="sensor-name">${escapeHtml(s.name)}</span>
-      <span class="sensor-value">${value}</span>
-      <span class="sensor-note">${escapeHtml(s.location_note || '')}</span>
-      <span class="sensor-status">${statusLabel(s, ev.key)}</span>
-      <span class="sensor-spark">${sparkline(s)}</span>
-    </button>`;
-}
-
-function healthTable(street) {
-  if (!street.length) return '<p class="muted">No street sensors installed yet.</p>';
-  const rows = street.map(({ sensor: s, ev }) => `
-    <tr data-action="select" data-id="${s.id}">
-      <td>${escapeHtml(s.name)}${s.is_simulated ? '<span class="sub">Simulated</span>' : ''}</td>
-      <td><span class="dot" style="--c:${STATUS[ev.key].color}"></span>${STATUS[ev.key].label}</td>
-      <td class="num">${ev.water == null ? '' : fmtIn(ev.water)}</td>
-      <td class="num">${ev.ageSec == null ? 'Never' : fmtAge(ev.ageSec)}</td>
-      <td class="num">${ev.battery == null ? '' : `${Math.round(ev.battery)}%`}</td>
-    </tr>`).join('');
-  return `
-    <table class="health">
-      <thead><tr><th>Sensor</th><th>Status</th><th>Water</th><th>Last reading</th><th>Battery</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-}
-
-function readout(label, value, sub = '') {
-  return `<div class="readout"><span class="readout-label">${label}</span><span class="readout-value">${value}</span>${sub ? `<span class="readout-sub">${sub}</span>` : ''}</div>`;
-}
-
-function trendWord(delta) {
-  if (Math.abs(delta) < 0.25) return 'about the same';
-  return delta > 0 ? `up ${fmtIn(delta)}` : `down ${fmtIn(-delta)}`;
-}
-
-function statsHtml(s, ev) {
-  const color = STATUS[ev.key].color;
-  const personal = s.mode === 'personal';
-  const rows = [
-    readout(personal ? 'Water on floor' : 'Water above road', fmtIn(ev.water), fmtCm(ev.water)),
-    readout('Trend', fmtRise(ev.rise)),
-  ];
-  const fc = state.forecasts.get(s.id);
-  if (fc) {
-    rows.push(readout('Forecast in 30 min', fmtIn(fc.depth30), trendWord(fc.depth30 - fc.current)));
-    rows.push(readout('Forecast in 60 min', fmtIn(fc.depth60), trendWord(fc.depth60 - fc.current)));
-    if (fc.crossMin != null && ev.key !== 'flooding') rows.push(readout('Impassable in', fmtEta(fc.crossMin), 'from the forecast model'));
-  } else if (ev.etaMin != null && ev.key !== 'offline') {
-    rows.push(readout(personal ? 'Reaches alert level in' : 'Impassable in', fmtEta(ev.etaMin)));
-  }
-  if (ev.ice) rows.push(readout('Ice risk', 'Likely', 'Freezing air with water on the road'));
-  if (ev.temp != null) rows.push(readout('Air temperature', fmtTempF(ev.temp)));
-  if (ev.battery != null) rows.push(readout('Battery', `${Math.round(ev.battery)}%`, ev.battery < LOW_BATTERY_PCT ? 'Recharge soon' : 'USB rechargeable'));
-
-  let updated = ev.ageSec == null ? 'Waiting for the first reading' : `Updated ${fmtAge(ev.ageSec)}`;
-  if (sim.drives(s)) updated = `Storm replay, ${fmtClock(sim.clock().toISOString())}`;
-  return `
-    <div class="status-line" style="--c:${color}">
-      <span class="status-word">${statusLabel(s, ev.key)}</span>
-      <span class="status-time">${updated}</span>
-    </div>
-    <div class="readouts">${rows.join('')}</div>`;
-}
-
-function fillInstallPoint() {
-  const el = live('install-point');
-  if (!el) return;
-  const p = state.installPoint;
-  el.textContent = p ? `Location: ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}` : 'No location chosen yet.';
 }
 
 function setMessage(text, isError = false) {
-  const els = panel.querySelectorAll('[data-live="message"]');
-  els.forEach((el) => {
-    el.className = `message${isError ? ' error' : ''}`;
+  panel.querySelectorAll('[data-live="message"]').forEach((el) => {
+    el.className = `msg${isError ? ' error' : ''}`;
     el.textContent = text;
   });
 }
 
-function renderReplayStatus() {
-  const el = document.getElementById('replay-status');
-  if (!sim.running) {
-    el.hidden = true;
-    return;
-  }
-  el.hidden = false;
-  el.innerHTML = `<span class="pulse"></span>Storm replay ${fmtClock(sim.clock().toISOString())}, ${sim.rainfall().toFixed(1)} in/hr rain
-    <button class="link-btn" data-action="replay-stop">Stop</button>`;
+function renderAll() {
+  renderTopbar();
+  renderPanel();
+  renderDemo();
+  refresh();
+}
+
+function tabFor(view) {
+  if (view === 'sensor') return sensorById(state.selectedId)?.mode === 'personal' ? 'mine' : 'map';
+  if (view === 'add') return state.wizard.mode === 'street' ? 'network' : 'mine';
+  if (['point', 'report'].includes(view)) return 'map';
+  return view;
+}
+
+function renderTopbar() {
+  const active = tabFor(state.view);
+  document.querySelectorAll('#tabs [data-view]').forEach((btn) => {
+    btn.classList.toggle('on', btn.dataset.view === active);
+    btn.setAttribute('aria-current', btn.dataset.view === active ? 'page' : 'false');
+  });
+  document.getElementById('tab-network').hidden = !isOfficial();
+  document.getElementById('account-btn').textContent = state.session ? (state.profile?.display_name || 'Account') : 'Sign in';
+}
+
+const VIEWS = {
+  map: (c) => V.mapView(c),
+  point: (c) => V.pointView(c),
+  sensor: (c) => {
+    const s = sensorById(state.selectedId);
+    return s ? V.sensorView(c, s) : V.mapView(c);
+  },
+  report: () => V.reportView(),
+  auth: (c) => V.authView(c),
+  account: (c) => (state.session ? V.accountView(c) : V.authView(c)),
+  mine: (c) => V.mineView(c),
+  network: (c) => V.networkView(c),
+  add: (c) => V.addView(c),
+};
+
+function renderPanel() {
+  destroyChart();
+  panel.innerHTML = (VIEWS[state.view] || VIEWS.map)(ctx());
+  panel.scrollTop = 0;
+  panel.classList.remove('enter');
+  void panel.offsetWidth;
+  panel.classList.add('enter');
+  const s = state.view === 'sensor' ? sensorById(state.selectedId) : null;
+  if (s) mountChart(s);
 }
 
 function chartSeries(sensor) {
@@ -1216,69 +534,51 @@ function chartSeries(sensor) {
   const points = list.filter((r) => Date.parse(r.created_at) >= cutoff);
   const step = Math.max(1, Math.ceil(points.length / 240));
   const sampled = points.filter((_, i) => i % step === 0 || i === points.length - 1);
-  const labels = sampled.map((r) => fmtClock(r.label_time || r.created_at));
-  const water = sampled.map((r) => Number(cmToIn(waterCm(sensor, r) ?? 0).toFixed(2)));
-  const forecast = water.map(() => null);
+  const at = (r) => Date.parse(r.label_time || r.created_at);
+  const water = sampled.map((r) => ({ x: at(r), y: Number(cmToIn(waterCm(sensor, r) ?? 0).toFixed(2)) }));
   const fc = state.forecasts.get(sensor.id);
-  if (fc && water.length) {
-    forecast[forecast.length - 1] = water[water.length - 1];
-    labels.push(`${fmtClock(new Date(fc.at + 30 * 60000).toISOString())} (forecast)`, `${fmtClock(new Date(fc.at + 60 * 60000).toISOString())} (forecast)`);
-    water.push(null, null);
-    forecast.push(Number(cmToIn(fc.depth30).toFixed(2)), Number(cmToIn(fc.depth60).toFixed(2)));
-  }
-  return { labels, water, forecast, alert: Number(cmToIn(sensor.alert_depth_cm).toFixed(2)) };
+  const forecast = fc && water.length
+    ? [water[water.length - 1], { x: fc.at + 30 * 60000, y: Number(cmToIn(fc.depth30).toFixed(2)) }, { x: fc.at + 60 * 60000, y: Number(cmToIn(fc.depth60).toFixed(2)) }]
+    : [];
+  const xs = [...water, ...forecast].map((p) => p.x);
+  const limit = Number(cmToIn(sensor.alert_depth_cm).toFixed(2));
+  const span = xs.length ? [Math.min(...xs), Math.max(...xs)] : [Date.now() - 3600e3, Date.now()];
+  return { water, forecast, limitLine: [{ x: span[0], y: limit }, { x: span[1], y: limit }], limit, span };
 }
 
 function mountChart(sensor) {
   const canvas = panel.querySelector('#chart');
   if (!canvas || !window.Chart) return;
-  const series = chartSeries(sensor);
+  const sr = chartSeries(sensor);
   state.chart = new window.Chart(canvas, {
     type: 'line',
     data: {
-      labels: series.labels,
       datasets: [
-        {
-          label: 'Water depth (in)',
-          data: series.water,
-          borderColor: '#1d6fa5',
-          backgroundColor: 'rgba(29, 111, 165, 0.12)',
-          fill: true,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.25,
-        },
-        {
-          label: 'Forecast (in)',
-          data: series.forecast,
-          borderColor: '#11a39a',
-          borderDash: [5, 4],
-          borderWidth: 2,
-          pointRadius: 3,
-          pointBackgroundColor: '#11a39a',
-          fill: false,
-          spanGaps: false,
-        },
-        {
-          label: sensor.mode === 'personal' ? 'Alert level' : 'Impassable',
-          data: series.labels.map(() => series.alert),
-          borderColor: '#c0392b',
-          borderDash: [6, 4],
-          borderWidth: 1.5,
-          pointRadius: 0,
-          fill: false,
-        },
+        { label: 'Water (in)', data: sr.water, borderColor: '#1d5c8f', backgroundColor: 'rgba(29, 92, 143, 0.08)', fill: true, pointRadius: 0, borderWidth: 1.6, tension: 0.2 },
+        { label: 'Forecast (in)', data: sr.forecast, borderColor: '#1d5c8f', borderDash: [3, 3], borderWidth: 1.4, pointRadius: 2.5, pointBackgroundColor: '#1d5c8f', fill: false },
+        { label: sensor.mode === 'personal' ? 'Alert level' : 'Impassable', data: sr.limitLine, borderColor: '#a3302a', borderDash: [1, 3], borderWidth: 1.2, pointRadius: 0, fill: false },
       ],
     },
     options: {
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { display: false } },
+      parsing: false,
+      interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: (items) => (items.length ? fmtClock(new Date(items[0].parsed.x).toISOString()) : '') } },
+      },
       scales: {
-        x: { ticks: { maxTicksLimit: 6, maxRotation: 0 }, grid: { display: false } },
-        y: { beginAtZero: true, suggestedMax: series.alert * 1.3, title: { display: true, text: 'inches' } },
+        x: {
+          type: 'linear',
+          min: sr.span[0],
+          max: sr.span[1],
+          ticks: { maxTicksLimit: 5, maxRotation: 0, callback: (v) => fmtClock(new Date(v).toISOString()) },
+          grid: { display: false },
+          border: { color: '#cfc9bd' },
+        },
+        y: { beginAtZero: true, suggestedMax: sr.limit * 1.3, grid: { color: '#ece8df' }, border: { display: false }, title: { display: true, text: 'inches' } },
       },
     },
   });
@@ -1287,12 +587,13 @@ function mountChart(sensor) {
 
 function updateChart(sensor) {
   if (!state.chart || state.chartFor !== sensor.id) return;
-  const series = chartSeries(sensor);
-  state.chart.data.labels = series.labels;
-  state.chart.data.datasets[0].data = series.water;
-  state.chart.data.datasets[1].data = series.forecast;
-  state.chart.data.datasets[2].data = series.labels.map(() => series.alert);
-  state.chart.options.scales.y.suggestedMax = series.alert * 1.3;
+  const sr = chartSeries(sensor);
+  state.chart.data.datasets[0].data = sr.water;
+  state.chart.data.datasets[1].data = sr.forecast;
+  state.chart.data.datasets[2].data = sr.limitLine;
+  state.chart.options.scales.x.min = sr.span[0];
+  state.chart.options.scales.x.max = sr.span[1];
+  state.chart.options.scales.y.suggestedMax = sr.limit * 1.3;
   state.chart.update('none');
 }
 
@@ -1302,56 +603,131 @@ function destroyChart() {
   state.chartFor = null;
 }
 
+function renderReplayStatus() {
+  const el = document.getElementById('replay-status');
+  if (!sim.running) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = `<span class="pulse"></span>Storm replay at ${fmtClock(sim.clock().toISOString())}, ${sim.rainfall().toFixed(1)} in/hr <button class="link" data-action="replay-stop">Stop</button>`;
+}
+
 function renderDemo() {
   const el = document.getElementById('demo');
   const home = state.sensors.find((s) => s.mode === 'personal' && s.is_simulated && s.owner_id === userId());
   el.innerHTML = `
-    <div class="demo-head">
-      <h2>Demo controls</h2>
-      <button class="link-btn" data-demo="close">Close</button>
-    </div>
-    <p>Storm replay runs a three-hour storm at ${REPLAY.speed} times normal speed through the simulated street sensors.</p>
-    <label class="check"><input type="checkbox" id="demo-include-real" ${sim.running ? 'disabled' : ''} ${sim.includeReal ? 'checked' : ''}> Also drive the Mt. Pleasant Ave sensor</label>
-    <button class="btn" data-demo="${sim.running ? 'replay-stop' : 'replay-start'}">${sim.running ? 'Stop storm replay' : 'Start storm replay'}</button>
-    <h3>Home sensor</h3>
-    ${home
-      ? `<div class="demo-row">
-          <button class="btn btn-secondary" data-demo="basement">Basement water</button>
-          <button class="btn btn-secondary" data-demo="battery">Low battery</button>
-          <button class="btn btn-secondary" data-demo="reset">Reset</button>
-        </div>`
-      : '<p class="muted">Sign in with the homeowner demo account to use these.</p>'}`;
+    <div class="demo-head"><strong>Demo controls</strong><button class="link" data-demo="close">Close</button></div>
+    <p>Storm replay plays a simulated three-hour storm at ${REPLAY.speed} times normal speed through the street sensors in your account, so you can see how forecasts and alerts behave without waiting for rain.</p>
+    <p><button class="btn small" data-demo="${sim.running ? 'replay-stop' : 'replay-start'}">${sim.running ? 'Stop the replay' : 'Start a storm replay'}</button></p>
+    ${home ? `<p>Home demo unit</p><p class="demo-row"><button class="btn small ghost" data-demo="basement">Water on the floor</button><button class="btn small ghost" data-demo="battery">Low battery</button><button class="btn small ghost" data-demo="reset">Reset</button></p>` : ''}`;
 }
 
-function goTo(view, selectedId = null) {
-  if ((state.view === 'report' || state.view === 'install' || state.view === 'point') && view !== state.view) {
-    map.clearPin();
-    state.installPoint = null;
-  }
+function toggleDemo(force) {
+  const el = document.getElementById('demo');
+  el.hidden = force === undefined ? !el.hidden : !force;
+  if (!el.hidden) renderDemo();
+}
+
+function goTo(view, { selectedId = null } = {}) {
+  const leaving = state.view;
+  if (['report', 'point', 'add'].includes(leaving) && view !== leaving) map.clearPin();
   if (view !== 'point') state.point = null;
   state.view = view;
   state.selectedId = selectedId;
   renderAll();
 }
 
-function selectSensor(id) {
-  if (state.view === 'install' || state.view === 'report') return;
+function openSensor(id) {
+  if (state.view === 'report' || (state.view === 'add' && state.wizard.step === 2)) return;
   const s = sensorById(id);
   if (!s) return;
-  let view = 'public';
-  if (s.mode === 'personal') view = 'home';
-  else if (state.view === 'municipal' && isOfficial()) view = 'municipal';
-  goTo(view, id);
-  if (s.lat != null) map.focus([s.lat, s.lng]);
+  goTo('sensor', { selectedId: id });
+  if (s.lat != null) map.panTo([s.lat, s.lng]);
+}
+
+function openPoint(latlng, title = null) {
+  map.clearPin();
+  state.point = [latlng.lat, latlng.lng];
+  state.pointTitle = title;
+  state.view = 'point';
+  state.selectedId = null;
+  renderAll();
+  map.setPin(latlng, false);
+  const [lat, lng] = state.point;
+  placeName(lat, lng)
+    .then((name) => {
+      if (name && state.point && state.point[0] === lat) fill('point-place', `${escapeHtml(name)}<span class="mono"> ${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`);
+    })
+    .catch(() => {});
+}
+
+function openSite(k) {
+  const site = state.sites[k];
+  if (!site) return;
+  openPoint(L.latLng(site.lat, site.lng), `Suggested site ${k + 1}${site.road ? `: ${site.road}` : ''}`);
+}
+
+function onMapClick(latlng) {
+  if (state.view === 'report') {
+    map.setPin(latlng, true);
+  } else if (state.view === 'add' && state.wizard.step === 2 && state.wizard.mode === 'street') {
+    setWizardPoint(latlng);
+  } else {
+    openPoint(latlng);
+  }
+}
+
+function setWizardPoint(latlng) {
+  state.wizard.point = latlng;
+  map.setPin(latlng, true, (moved) => {
+    state.wizard.point = moved;
+    fill('pick-point', `${moved.lat.toFixed(5)}, ${moved.lng.toFixed(5)}`);
+  });
+  fill('pick-point', `${latlng.lat.toFixed(5)}, ${latlng.lng.toFixed(5)}`);
+}
+
+function startWizard(mode, point = null) {
+  if (!state.session) {
+    state.authMode = 'signin';
+    state.afterAuth = { view: 'add', mode };
+    goTo('auth');
+    return;
+  }
+  state.wizard = freshWizard(mode === 'street' && isOfficial() ? 'street' : 'personal');
+  goTo('add');
+  if (point) state.wizard.pendingPoint = point;
+}
+
+async function calibrateSensor(id) {
+  const s = sensorById(id);
+  const r = latestRealOf(id);
+  if (!s || !r || Date.now() - Date.parse(r.created_at) > 60000) {
+    setMessage('The sensor hasn\'t sent a fresh reading yet. Make sure it\'s powered and online, then try again.', true);
+    return false;
+  }
+  const mount = Number((r.distance_mm / 10).toFixed(1));
+  try {
+    await data.updateSensor(id, { mount_height_cm: mount });
+    s.mount_height_cm = mount;
+    return true;
+  } catch (err) {
+    setMessage(`That didn't save: ${err.message}`, true);
+    return false;
+  }
 }
 
 async function handleAction(action, el) {
   switch (action) {
     case 'select':
-      selectSensor(el.dataset.id);
+      openSensor(el.dataset.id);
       break;
+    case 'to-map':
     case 'back':
-      goTo(state.view === 'report' ? 'public' : state.view === 'install' ? 'municipal' : state.view);
+      goTo('map');
+      break;
+    case 'to-mine':
+      goTo('mine');
       break;
     case 'goto':
       goTo(el.dataset.view);
@@ -1368,38 +744,107 @@ async function handleAction(action, el) {
       goTo('report');
       map.setPin(map.center(), true);
       break;
+    case 'report-here': {
+      const [lat, lng] = state.point;
+      goTo('report');
+      map.setPin(L.latLng(lat, lng), true);
+      break;
+    }
     case 'focus-report':
       map.openReport(Number(el.dataset.id));
       break;
-    case 'install-start':
-      goTo('install');
-      fillInstallPoint();
+    case 'report-remove': {
+      const id = Number(el.dataset.id);
+      if (!window.confirm('Remove this report from the map?')) break;
+      try {
+        const removed = await data.deleteReport(id, reporterToken);
+        if (removed) {
+          state.reports = state.reports.filter((r) => r.id !== id);
+          state.myReports.delete(id);
+          saveSet('floodmesh-my-reports', state.myReports);
+          map.closePopups();
+          notify({ title: 'Report removed', body: 'It no longer appears on the map.', level: 'info' });
+        } else {
+          notify({ title: 'Couldn\'t remove that report', body: 'Only the person who sent it, from the same browser, or town staff can remove it.', level: 'warning' });
+        }
+      } catch (err) {
+        notify({ title: 'Couldn\'t remove that report', body: err.message, level: 'warning' });
+      }
+      refresh();
+      break;
+    }
+    case 'report-clear': {
+      const id = Number(el.dataset.id);
+      try {
+        const clears = await data.clearReport(id, voterToken);
+        state.cleared.add(id);
+        saveSet('floodmesh-cleared', state.cleared);
+        if (clears >= 2) state.reports = state.reports.filter((r) => r.id !== id);
+        map.closePopups();
+      } catch (err) {
+        notify({ title: 'That didn\'t go through', body: err.message, level: 'warning' });
+      }
+      refresh();
+      break;
+    }
+    case 'site':
+      openSite(Number(el.dataset.k));
+      break;
+    case 'add-start':
+      startWizard(el.dataset.mode);
+      break;
+    case 'add-here': {
+      const [lat, lng] = state.point;
+      startWizard('street', L.latLng(lat, lng));
+      break;
+    }
+    case 'add-back':
+      state.wizard.step = 1;
+      renderPanel();
+      break;
+    case 'add-cancel':
+      goTo(state.wizard.mode === 'street' ? 'network' : 'mine');
+      break;
+    case 'add-calibrate':
+      if (await calibrateSensor(state.wizard.sensorId)) {
+        notify({ title: 'Sensor ready', body: 'The dry level is saved, and the sensor is now monitoring.', level: 'info' });
+        goTo('sensor', { selectedId: state.wizard.sensorId });
+      }
+      break;
+    case 'add-finish':
+      goTo('sensor', { selectedId: state.wizard.sensorId });
       break;
     case 'mute':
       if (state.muted.has(el.dataset.id)) state.muted.delete(el.dataset.id);
       else state.muted.add(el.dataset.id);
-      saveMuted();
+      saveSet('floodmesh-muted', state.muted);
       fillLive();
       break;
     case 'calibrate':
-      await calibrate(el.dataset.id);
-      break;
-    case 'show-key':
-      await revealKey(el.dataset.id);
-      break;
-    case 'copy-key':
-      try {
-        await navigator.clipboard.writeText(el.dataset.key);
-        el.textContent = 'Copied';
-      } catch {
-        el.textContent = 'Select and copy manually';
+      if (await calibrateSensor(el.dataset.id)) {
+        renderPanel();
+        setMessage(`The dry level is now ${fmtIn(sensorById(el.dataset.id).mount_height_cm)} below the sensor.`);
       }
       break;
+    case 'remove-sensor': {
+      const s = sensorById(el.dataset.id);
+      if (!s || !window.confirm(`Remove ${s.name}? It will stop reporting until you pair it again.`)) break;
+      try {
+        await data.removeSensor(s.id);
+        state.sensors = state.sensors.filter((x) => x.id !== s.id);
+        state.readings.delete(s.id);
+        notify({ title: `${s.name} removed`, body: 'You can pair the same sensor again later with its pairing code.', level: 'info' });
+        goTo(s.mode === 'personal' ? 'mine' : 'network');
+      } catch (err) {
+        setMessage(`Couldn't remove it: ${err.message}`, true);
+      }
+      break;
+    }
     case 'signout':
-      await db.auth.signOut();
+      await data.auth.signOut();
       state.session = null;
       await onIdentityChange();
-      goTo('public');
+      goTo('map');
       break;
     case 'alerts-enable':
       await enableBrowserAlerts();
@@ -1408,71 +853,50 @@ async function handleAction(action, el) {
     case 'demo-toggle':
       toggleDemo();
       break;
+    case 'how':
+      showWelcome('how');
+      break;
+    case 'stack':
+      showWelcome('stack');
+      break;
+    case 'locate':
+      locate();
+      break;
+    case 'zoom-point':
+      if (state.point) map.goTo(state.point, 15);
+      break;
     case 'replay-stop':
       sim.stop();
-      break;
-    case 'point-back':
-      goTo('public');
-      break;
-    case 'site':
-      openSite(Number(el.dataset.k));
-      break;
-    case 'install-site': {
-      const site = state.sites[Number(el.dataset.k)];
-      if (!site) break;
-      goTo('install');
-      setInstallPoint(L.latLng(site.lat, site.lng));
-      const name = panel.querySelector('[name="name"]');
-      if (name && site.road) name.value = `${site.road} low point`;
-      break;
-    }
-    case 'install-here': {
-      const [lat, lng] = state.point;
-      goTo('install');
-      setInstallPoint(L.latLng(lat, lng));
-      break;
-    }
-    case 'report-here': {
-      const [lat, lng] = state.point;
-      goTo('report');
-      map.setPin(L.latLng(lat, lng), true);
-      break;
-    }
-    case 'how':
-      showWelcome(true);
       break;
     default:
       break;
   }
 }
 
+function field(form, name) {
+  const el = form.querySelector(`[name="${name}"]:checked`) || form.querySelector(`[name="${name}"]`);
+  return el ? el.value : '';
+}
+
 async function handleForm(name, form) {
-  switch (name) {
-    case 'auth':
-      return submitAuth(form);
-    case 'report':
-      return submitReport(form);
-    case 'add-personal':
-      return submitPersonal(form);
-    case 'install':
-      return submitInstall(form);
-    case 'alert-depth':
-      return submitAlertDepth(form);
-    default:
-      return undefined;
+  try {
+    if (name === 'auth') await submitAuth(form);
+    else if (name === 'report') await submitReport(form);
+    else if (name === 'pair-code') await submitPairCode(form);
+    else if (name === 'pair-details') await submitPairDetails(form);
+    else if (name === 'alert-depth') await submitAlertDepth(form);
+  } catch (err) {
+    setMessage(err.message, true);
   }
 }
 
 async function submitAuth(form) {
   const email = field(form, 'email').trim();
   const password = field(form, 'password');
-  setMessage('Working...');
-  let result;
-  if (state.authMode === 'signin') {
-    result = await db.auth.signInWithPassword({ email, password });
-  } else {
-    result = await db.auth.signUp({ email, password, options: { data: { display_name: field(form, 'name').trim() } } });
-  }
+  setMessage('One moment.');
+  const result = state.authMode === 'signin'
+    ? await data.auth.signIn(email, password)
+    : await data.auth.signUp(email, password, field(form, 'name').trim());
   if (result.error) {
     setMessage(result.error.message, true);
     return;
@@ -1483,7 +907,10 @@ async function submitAuth(form) {
   }
   state.session = result.data.session;
   await onIdentityChange();
-  goTo(isOfficial() ? 'municipal' : 'home');
+  const next = state.afterAuth;
+  state.afterAuth = null;
+  if (next && next.view === 'add') startWizard(next.mode);
+  else goTo(isOfficial() ? 'network' : 'mine');
 }
 
 async function submitReport(form) {
@@ -1492,168 +919,156 @@ async function submitReport(form) {
     setMessage('Drop the pin on the map first so people know where the problem is.', true);
     return;
   }
-  const note = field(form, 'note').trim();
-  const row = {
-    lat: point.lat,
-    lng: point.lng,
-    kind: field(form, 'kind'),
-    note: note ? note.slice(0, 280) : null,
-    reporter_id: userId(),
-  };
-  setMessage('Sending...');
-  state.reportPending = true;
-  const { data, error } = await db.from('reports').insert(row).select().single();
-  setTimeout(() => { state.reportPending = false; }, 3000);
-  if (error) {
-    setMessage(`Could not send the report: ${error.message}`, true);
-    return;
-  }
-  state.myReports.add(data.id);
-  addReport(data);
-  map.clearPin();
-  goTo('public');
-  notify({ title: 'Report received', body: 'Thanks for letting people know. Your report is on the map now and will expire in four hours.', level: 'info' });
+  setMessage('Sending.');
+  const row = await data.fileReport({ lat: point.lat, lng: point.lng, kind: field(form, 'kind'), note: field(form, 'note').trim(), token: reporterToken });
+  state.myReports.add(row.id);
+  saveSet('floodmesh-my-reports', state.myReports);
+  if (!state.reports.some((r) => r.id === row.id)) state.reports.unshift(row);
+  goTo('map');
+  notify({ title: 'Report sent', body: 'It\'s on the map now. You can remove it from the list if you made a mistake.', level: 'info' });
 }
 
-async function submitPersonal(form) {
-  setMessage('Adding...');
-  const { data, error } = await db
-    .from('sensors')
-    .insert({
-      mode: 'personal',
-      owner_id: userId(),
-      name: field(form, 'name').trim(),
-      location_note: field(form, 'note').trim() || null,
-      mount_height_cm: 100,
-      alert_depth_cm: 2,
-    })
-    .select()
-    .single();
-  if (error) {
-    setMessage(`Could not add the sensor: ${error.message}`, true);
-    return;
-  }
-  state.sensors.push(data);
-  goTo('home', data.id);
-  await revealKey(data.id);
+function normalizeCode(raw) {
+  return raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-async function submitInstall(form) {
-  const point = state.installPoint;
-  if (!point) {
-    setMessage('Click the map first to choose where the sensor goes.', true);
+async function submitPairCode(form) {
+  const code = normalizeCode(field(form, 'code'));
+  if (!/^[A-Z0-9]{6}$/.test(code)) {
+    setMessage('Pairing codes have six letters and numbers, like ABC-123.', true);
     return;
   }
-  setMessage('Creating...');
-  const { data, error } = await db
-    .from('sensors')
-    .insert({
-      mode: 'street',
-      owner_id: userId(),
-      name: field(form, 'name').trim(),
-      location_note: field(form, 'note').trim() || null,
-      lat: point.lat,
-      lng: point.lng,
-      mount_height_cm: Number(field(form, 'mount')),
-      alert_depth_cm: Number(field(form, 'depth')) * 2.54,
-    })
-    .select()
-    .single();
-  if (error) {
-    setMessage(`Could not create the sensor: ${error.message}`, true);
+  setMessage('Looking for the sensor.');
+  const found = await data.checkPairingCode(code);
+  if (!found) {
+    setMessage('No sensor is waiting with that code. Check that its setup page says it\'s connected, then try again.', true);
     return;
   }
-  state.sensors.push(data);
+  state.wizard.code = code;
+  state.wizard.step = 2;
+  renderPanel();
+  if (state.wizard.pendingPoint && state.wizard.mode === 'street') setWizardPoint(state.wizard.pendingPoint);
+}
+
+async function submitPairDetails(form) {
+  const wz = state.wizard;
+  const mode = isOfficial() ? field(form, 'mode') || wz.mode : 'personal';
+  wz.name = field(form, 'name').trim();
+  wz.note = field(form, 'note').trim();
+  if (mode === 'street' && !wz.point) {
+    setMessage('Click the map to show where the sensor is mounted.', true);
+    return;
+  }
+  setMessage('Pairing.');
+  const id = await data.claimDevice({
+    code: wz.code,
+    mode,
+    name: wz.name,
+    note: wz.note,
+    lat: mode === 'street' ? wz.point.lat : null,
+    lng: mode === 'street' ? wz.point.lng : null,
+    alertCm: Number(field(form, 'depth')) * 2.54,
+  });
+  const sensor = await data.fetchSensor(id);
+  if (sensor) state.sensors.push(sensor);
+  wz.sensorId = id;
+  wz.mode = mode;
+  wz.step = 3;
   map.clearPin();
-  state.installPoint = null;
   updateSites();
-  goTo('municipal', data.id);
-  await revealKey(data.id);
+  renderAll();
 }
 
 async function submitAlertDepth(form) {
   const id = form.dataset.id;
   const cm = Number(field(form, 'depth')) * 2.54;
-  const { error } = await db.from('sensors').update({ alert_depth_cm: cm }).eq('id', id);
-  if (error) {
-    setMessage(`Could not save: ${error.message}`, true);
-    return;
-  }
+  await data.updateSensor(id, { alert_depth_cm: cm });
   const s = sensorById(id);
   if (s) s.alert_depth_cm = cm;
-  setMessage(`Alerts will now go off at ${fmtIn(cm)}.`);
-  refreshLive();
+  setMessage(`Saved. Alerts will now go off at ${fmtIn(cm)}.`);
+  refresh();
 }
 
-async function calibrate(id) {
-  const s = sensorById(id);
-  const r = latestRealOf(id);
-  if (!s || !r || Date.now() - Date.parse(r.created_at) > 60000) {
-    setMessage('The sensor hasn\'t sent a fresh reading yet, so make sure it\'s powered and online and then try again.', true);
+function locate() {
+  if (!navigator.geolocation) {
+    notify({ title: 'Location unavailable', body: 'This browser can\'t share your location.', level: 'info' });
     return;
   }
-  const mount = Number((r.distance_mm / 10).toFixed(1));
-  const { error } = await db.from('sensors').update({ mount_height_cm: mount }).eq('id', id);
-  if (error) {
-    setMessage(`Could not save: ${error.message}`, true);
-    return;
-  }
-  s.mount_height_cm = mount;
-  renderPanel();
-  setMessage(`The dry level is now set at ${fmtIn(mount)} below the sensor.`);
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      state.place = 'Around your location';
+      state.placeAt = [pos.coords.latitude, pos.coords.longitude];
+      map.goTo([pos.coords.latitude, pos.coords.longitude], 16);
+    },
+    () => notify({ title: 'Location unavailable', body: 'Your browser didn\'t share a location. You can search for a place instead.', level: 'info' }),
+    { enableHighAccuracy: false, timeout: 10000 },
+  );
 }
 
-async function revealKey(id) {
-  const el = live('key');
-  if (!el) return;
-  el.textContent = 'Loading...';
-  let key = state.keys.get(id);
-  if (!key) {
-    const { data, error } = await db.from('sensor_keys').select('device_key').eq('sensor_id', id).maybeSingle();
-    if (error || !data) {
-      el.textContent = 'Could not load the device key.';
+async function runSearch(query) {
+  const box = document.getElementById('search-results');
+  if (!query.trim()) return;
+  box.hidden = false;
+  box.innerHTML = '<p class="search-note">Searching.</p>';
+  try {
+    const results = await searchPlaces(query);
+    if (!results.length) {
+      box.innerHTML = '<p class="search-note">Nothing matched that search.</p>';
       return;
     }
-    key = data.device_key;
-    state.keys.set(id, key);
+    showPlace(results[0]);
+    box.innerHTML = results.map((r, k) => `<button type="button" data-k="${k}">${escapeHtml(r.name)}</button>`).join('');
+    box.onclick = (e) => {
+      const btn = e.target.closest('[data-k]');
+      if (!btn) return;
+      showPlace(results[Number(btn.dataset.k)]);
+      box.hidden = true;
+    };
+  } catch (err) {
+    box.innerHTML = '<p class="search-note">Search isn\'t available right now.</p>';
   }
-  el.innerHTML = `
-    <p>Paste this into <code>DEVICE_KEY</code> in the firmware and upload it to the sensor.</p>
-    <div class="key-row">
-      <code class="key">${escapeHtml(key)}</code>
-      <button class="btn btn-secondary btn-small" data-action="copy-key" data-key="${escapeHtml(key)}">Copy</button>
-    </div>`;
 }
 
-function toggleDemo(force) {
-  const el = document.getElementById('demo');
-  el.hidden = force === undefined ? !el.hidden : !force;
-  if (!el.hidden) renderDemo();
+function showPlace(place) {
+  state.place = place.short;
+  state.placeAt = [place.lat, place.lng];
+  if (state.view !== 'map') goTo('map');
+  if (place.bounds) map.fitBounds(place.bounds, 16);
+  else map.goTo([place.lat, place.lng], 16);
 }
 
-function handleDemo(action) {
-  switch (action) {
-    case 'close':
-      toggleDemo(false);
-      break;
-    case 'replay-start':
-      sim.start(document.getElementById('demo-include-real')?.checked);
-      break;
-    case 'replay-stop':
-      sim.stop();
-      break;
-    case 'basement':
-      sim.basementWater();
-      break;
-    case 'battery':
-      sim.lowBattery();
-      break;
-    case 'reset':
-      sim.resetHome();
-      break;
-    default:
-      break;
+const WELCOME_SECTIONS = { how: 'how-it-works', stack: 'how-its-built', who: 'who-its-for' };
+
+function scrollWelcome(section) {
+  const target = document.getElementById(WELCOME_SECTIONS[section]);
+  if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth' });
+}
+
+function showWelcome(section = null) {
+  const el = document.getElementById('welcome');
+  el.innerHTML = welcomeHtml();
+  el.hidden = false;
+  document.body.classList.add('welcome-open');
+  el.scrollTop = 0;
+  if (section) {
+    const target = document.getElementById(WELCOME_SECTIONS[section]);
+    if (target && target.scrollIntoView) target.scrollIntoView();
   }
+}
+
+function hideWelcome(go) {
+  document.getElementById('welcome').hidden = true;
+  document.body.classList.remove('welcome-open');
+  persist('floodmesh-welcomed', '1');
+  if (go === 'auth') {
+    state.authMode = 'signin';
+    goTo('auth');
+  } else if (go === 'mine') {
+    goTo('mine');
+  } else {
+    goTo('map');
+  }
+  map.resize();
 }
 
 panel.addEventListener('click', (e) => {
@@ -1669,6 +1084,30 @@ panel.addEventListener('submit', (e) => {
   handleForm(form.dataset.form, form);
 });
 
+panel.addEventListener('change', (e) => {
+  if (e.target.name === 'mode' && state.view === 'add' && state.wizard.step === 2) {
+    const form = e.target.closest('form');
+    state.wizard.name = field(form, 'name');
+    state.wizard.note = field(form, 'note');
+    state.wizard.mode = e.target.value;
+    if (state.wizard.mode !== 'street') map.clearPin();
+    renderPanel();
+    if (state.wizard.mode === 'street' && state.wizard.point) setWizardPoint(state.wizard.point);
+  }
+});
+
+panel.addEventListener('input', (e) => {
+  if (!e.target.classList.contains('code-input')) return;
+  const raw = normalizeCode(e.target.value).slice(0, 6);
+  e.target.value = raw.length > 3 ? `${raw.slice(0, 3)}-${raw.slice(3)}` : raw;
+});
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('.leaflet-popup [data-action]');
+  if (el) handleAction(el.dataset.action, el);
+  if (!e.target.closest('.search')) document.getElementById('search-results').hidden = true;
+});
+
 document.getElementById('tabs').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-view]');
   if (btn) goTo(btn.dataset.view);
@@ -1679,31 +1118,39 @@ document.getElementById('account-btn').addEventListener('click', () => {
   goTo(state.session ? 'account' : 'auth');
 });
 
+document.getElementById('how-btn').addEventListener('click', () => showWelcome());
+
+document.getElementById('search').addEventListener('submit', (e) => {
+  e.preventDefault();
+  runSearch(e.target.querySelector('input').value);
+});
+
 document.getElementById('replay-status').addEventListener('click', (e) => {
   if (e.target.closest('[data-action="replay-stop"]')) sim.stop();
+});
+
+document.getElementById('demo').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-demo]');
+  if (!btn) return;
+  const act = btn.dataset.demo;
+  if (act === 'close') toggleDemo(false);
+  else if (act === 'replay-start') sim.start();
+  else if (act === 'replay-stop') sim.stop();
+  else if (act === 'basement') sim.basementWater();
+  else if (act === 'battery') sim.lowBattery();
+  else if (act === 'reset') sim.resetHome();
 });
 
 document.getElementById('welcome').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-welcome]');
   if (!btn) return;
-  if (btn.dataset.welcome === 'how') {
-    const how = document.getElementById('how-it-works');
-    if (how && how.scrollIntoView) how.scrollIntoView({ behavior: 'smooth' });
-  } else {
-    hideWelcome(btn.dataset.welcome);
-  }
-});
-
-document.getElementById('how-btn').addEventListener('click', () => showWelcome(true));
-
-document.getElementById('demo').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-demo]');
-  if (btn) handleDemo(btn.dataset.demo);
+  if (WELCOME_SECTIONS[btn.dataset.welcome]) scrollWelcome(btn.dataset.welcome);
+  else hideWelcome(btn.dataset.welcome);
 });
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !document.getElementById('welcome').hidden) {
-    hideWelcome('public');
+    hideWelcome('map');
     return;
   }
   if (e.target instanceof Element && e.target.closest('input, textarea, select')) return;
@@ -1712,16 +1159,11 @@ document.addEventListener('keydown', (e) => {
 
 async function start() {
   if (window.Chart) {
-    window.Chart.defaults.font.family = "'Montserrat', system-ui, sans-serif";
-    window.Chart.defaults.color = '#4b5966';
+    window.Chart.defaults.font.family = "'Public Sans', system-ui, sans-serif";
+    window.Chart.defaults.font.size = 11;
+    window.Chart.defaults.color = '#6b7580';
   }
   renderAll();
-  const { data } = await db.auth.getSession();
-  state.session = data.session;
-  db.auth.onAuthStateChange((_event, session) => {
-    state.session = session;
-    setTimeout(() => onIdentityChange(), 0);
-  });
   let welcomed = false;
   try {
     welcomed = localStorage.getItem('floodmesh-welcomed') === '1';
@@ -1729,16 +1171,23 @@ async function start() {
     welcomed = false;
   }
   if (!welcomed) showWelcome();
-  risk.init();
+  state.session = await data.auth.session();
+  data.auth.onChange((session) => {
+    state.session = session;
+    setTimeout(() => onIdentityChange(), 0);
+  });
   loadForecastModel().then((model) => {
     state.model = model;
-    if (model) refreshLive();
+    if (model) refresh();
   });
+  scheduleAnalysis();
   await onIdentityChange(true);
-  setInterval(refreshLive, 1000);
-  setInterval(() => risk.refreshWeather(), 15 * 60000);
+  setInterval(refresh, 1000);
   setInterval(pollReadings, 15000);
-  setInterval(() => loadReports(), 60000);
+  setInterval(() => {
+    if (state.view === 'add' && state.wizard.step === 3) pollReadings();
+  }, 4000);
+  setInterval(loadReports, 60000);
   window.addEventListener('resize', () => map.resize());
 }
 

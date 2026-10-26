@@ -1,12 +1,12 @@
 import { OFFLINE_AFTER_SEC, RISING_CM_PER_MIN, WARNING_ETA_MIN, REPLAY } from './config.js';
 
 export const STATUS = {
-  normal:   { label: 'Normal',      color: '#2f7d4f', rank: 0 },
-  rising:   { label: 'Rising',      color: '#a87a00', rank: 1 },
-  warning:  { label: 'Warning',     color: '#d0610b', rank: 2 },
-  flooding: { label: 'Flooding',    color: '#c0392b', rank: 3 },
-  offline:  { label: 'Offline',     color: '#87919a', rank: -1 },
-  nodata:   { label: 'No data yet', color: '#87919a', rank: -1 },
+  normal: { label: 'Normal', color: '#3d7a55', rank: 0 },
+  rising: { label: 'Rising', color: '#a7780b', rank: 1 },
+  warning: { label: 'Warning', color: '#c25e1a', rank: 2 },
+  flooding: { label: 'Flooding', color: '#a3302a', rank: 3 },
+  offline: { label: 'Offline', color: '#8b929a', rank: -1 },
+  nodata: { label: 'Waiting for data', color: '#8b929a', rank: -1 },
 };
 
 const PERSONAL_LABELS = {
@@ -71,22 +71,29 @@ export function evaluate(sensor, latest, nowMs) {
 
 export function summarize(items) {
   const street = items.filter((i) => i.sensor.mode === 'street');
-  if (!street.length) return 'No street sensors have been installed in this area yet.';
-  const names = (key) => street.filter((i) => i.ev.key === key).map((i) => i.sensor.name);
+  if (!street.length) return '';
+  const reporting = street.filter((i) => i.ev.key !== 'offline' && i.ev.key !== 'nodata');
+  const silent = street.length - reporting.length;
+  if (!reporting.length) {
+    return street.length === 1
+      ? 'The sensor here isn\'t sending readings right now, so there is no live data for this area.'
+      : `None of the ${street.length} sensors here are sending readings right now, so there is no live data for this area.`;
+  }
+  const names = (key) => reporting.filter((i) => i.ev.key === key).map((i) => i.sensor.name);
   const clauses = [];
   const flooding = names('flooding');
   const warning = names('warning');
   const rising = names('rising');
-  const offline = names('offline');
   if (flooding.length) clauses.push(`water is over the road at ${joinNames(flooding)}`);
   if (warning.length) clauses.push(`it's getting close to road level at ${joinNames(warning)}`);
   if (rising.length) clauses.push(`it's rising at ${joinNames(rising)}`);
-  if (offline.length) clauses.push(`${offline.length === 1 ? 'one sensor isn\'t' : `${offline.length} sensors aren't`} reporting`);
+  const quiet = silent ? ` ${silent === 1 ? 'One sensor isn\'t' : `${silent} sensors aren't`} reporting.` : '';
   if (!clauses.length) {
-    return street.length === 1 ? 'The street sensor in this area is reading normal.' : `All ${street.length} street sensors in this area are reading normal.`;
+    const lead = reporting.length === 1 ? `${reporting[0].sensor.name} is reading normal.` : `All ${reporting.length} sensors that are reporting here read normal.`;
+    return `${lead}${quiet}`;
   }
   const sentence = joinNames(clauses);
-  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
+  return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.${quiet}`;
 }
 
 function joinNames(list) {

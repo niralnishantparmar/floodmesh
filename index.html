@@ -3,45 +3,47 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FloodMesh | Street-level flood monitoring for Edison, NJ</title>
-  <meta name="description" content="Live street-level flood readings, community reports, and home water alerts for Edison, New Jersey.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230e2a3f'/%3E%3Cpath d='M5 8h14M5 12h10M5 16h6' stroke='%23fff' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <title>FloodMesh, a live map of street flooding</title>
+  <meta name="description" content="Live street-level flood readings, terrain-based flood risk for any address, and alerts from low-cost water sensors.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23fbf6ea'/%3E%3Cpath d='M3.1 17.5 C 7 14.8, 10.5 14.8, 14.3 17.5 S 21.7 20.2, 25.5 17.5 C 26.6 16.7, 27.8 16.6, 28.9 17.5 A13 13 0 0 1 3.1 17.5 Z' fill='%232f7fc1'/%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%230f2740' stroke-width='2.6'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,500..700,100,0..1&family=IBM+Plex+Mono:wght@400;500&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="./" aria-label="FloodMesh home">
-      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
-        <rect width="24" height="24" rx="5" fill="#11a39a"/>
-        <path d="M5 8h14M5 12h10M5 16h6" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="13" fill="#fbf6ea"/>
+        <path d="M3.1 17.5 C 7 14.8, 10.5 14.8, 14.3 17.5 S 21.7 20.2, 25.5 17.5 C 26.6 16.7, 27.8 16.6, 28.9 17.5 A13 13 0 0 1 3.1 17.5 Z" fill="#2f7fc1"/>
+        <circle cx="16" cy="16" r="13" fill="none" stroke="#0f2740" stroke-width="2.6"/>
       </svg>
-      <span>FloodMesh</span>
+      <span class="wordmark">FloodMesh</span>
     </a>
+    <form class="search" id="search" role="search">
+      <input type="search" placeholder="Search for an address or place" aria-label="Search for an address or place" autocomplete="off">
+      <div class="search-results" id="search-results" hidden></div>
+    </form>
     <nav class="tabs" id="tabs" aria-label="Sections">
-      <button class="tab" data-view="public">Map</button>
-      <button class="tab" data-view="home">My home</button>
-      <button class="tab" data-view="municipal" id="tab-municipal" hidden>Municipal</button>
+      <button data-view="map">Map</button>
+      <button data-view="mine">My sensors</button>
+      <button data-view="network" id="tab-network" hidden>Network</button>
     </nav>
-    <div class="topbar-right">
-      <div class="replay-status" id="replay-status" hidden></div>
-      <button class="how-btn" id="how-btn">How it works</button>
-      <button class="account-btn" id="account-btn">Sign in</button>
+    <div class="top-right">
+      <div class="replay" id="replay-status" hidden></div>
+      <button class="top-link" id="how-btn">About</button>
+      <button class="account" id="account-btn">Sign in</button>
     </div>
   </header>
-
   <main class="layout">
     <aside class="panel" id="panel" aria-live="polite"></aside>
-    <div class="map" id="map" role="application" aria-label="Map of sensors and reports"></div>
+    <div class="map" id="map" role="application" aria-label="Flood map"></div>
   </main>
-
   <section class="demo" id="demo" hidden aria-label="Demo controls"></section>
-  <div class="welcome" id="welcome" hidden role="dialog" aria-label="Welcome to FloodMesh"></div>
-  <div class="notice-stack" id="notice-stack" aria-live="polite"></div>
-
+  <div class="welcome" id="welcome" hidden role="dialog" aria-label="About FloodMesh"></div>
+  <div class="notices" id="notice-stack" aria-live="polite"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
