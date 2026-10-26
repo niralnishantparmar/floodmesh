@@ -256,7 +256,7 @@ export function pointView(ctx) {
     ${back('Map', 'to-map')}
     <header class="page-head">
       <h1>${esc(ctx.state.pointTitle || 'Flood risk at this spot')}</h1>
-      <p class="muted" data-live="point-place">${lat.toFixed(5)}, ${lng.toFixed(5)}</p>
+      <p class="muted" data-live="point-place"><span class="mono">${lat.toFixed(5)}, ${lng.toFixed(5)}</span></p>
     </header>
     <div data-live="point"></div>
     <div class="actions">

@@ -657,7 +657,7 @@ function openPoint(latlng, title = null) {
   const [lat, lng] = state.point;
   placeName(lat, lng)
     .then((name) => {
-      if (name && state.point && state.point[0] === lat) fill('point-place', `${escapeHtml(name)}<span class="mono"> ${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`);
+      if (name && state.point && state.point[0] === lat) fill('point-place', `${escapeHtml(name)}<br><span class="mono">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`);
     })
     .catch(() => {});
 }
@@ -1159,9 +1159,9 @@ document.addEventListener('keydown', (e) => {
 
 async function start() {
   if (window.Chart) {
-    window.Chart.defaults.font.family = "'Public Sans', system-ui, sans-serif";
+    window.Chart.defaults.font.family = "'Atkinson Hyperlegible', system-ui, sans-serif";
     window.Chart.defaults.font.size = 11;
-    window.Chart.defaults.color = '#6b7580';
+    window.Chart.defaults.color = '#5f6e7c';
   }
   renderAll();
   let welcomed = false;

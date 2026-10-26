@@ -1,4 +1,4 @@
-import { LOGO, icon } from './brand.js';
+import { LOGO } from './brand.js';
 
 const DROPS = [
   [36, 30], [92, 62], [150, 24], [208, 70], [262, 36], [318, 80], [372, 28], [430, 64], [486, 34],
@@ -46,61 +46,70 @@ export const ILLUSTRATION = `
   </g>
 </svg>`;
 
-const FLOW = [
-  ['measure', 't-blue', 'Measure', 'A sensor above a road or basement floor measures the distance down to the surface. When water collects, that distance shrinks and the sensor reports it.'],
-  ['map', 't-mint', 'Map', 'Elevation data shows the low spots and drainage paths where water gathers, and the rain forecast shows how likely they are to fill up.'],
-  ['predict', 't-sun', 'Predict', 'A neural network trained on seven years of river readings and rainfall estimates where the water will be in 30 and 60 minutes.'],
-  ['alert', 't-coral', 'Alert', 'People watching a sensor hear about rising water before the road goes under, and residents can report flooding they see.'],
+const STEPS = [
+  ['Measure', 'A sensor above a road or basement floor measures the distance down to the surface. When water collects, that distance shrinks and the sensor reports it every ten seconds.'],
+  ['Map', 'Elevation data shows the low spots and drainage paths where water gathers, and the rain forecast shows how likely they are to fill up.'],
+  ['Predict', 'A neural network trained on seven years of river readings and rainfall estimates where the water will be in 30 and 60 minutes.'],
+  ['Alert', 'People watching a sensor hear about rising water before the road goes under, and residents can report flooding they see.'],
+];
+
+const PHOTOS = [
+  ['sensor.jpg', 'The FloodMesh prototype in its 3D-printed case.'],
+  ['inside.jpg', 'Inside: the ESP32-S3, the solar charger, and the battery.'],
+  ['test.jpg', 'Testing the sensor over a tub of water.'],
+  ['street.jpg', 'The bottom of the Mt. Pleasant Ave hill in Edison, where the first sensor goes.'],
+  ['setup.jpg', 'Connecting a sensor to Wi-Fi from a phone.'],
+  ['alert.jpg', 'A flooding alert arriving in the app.'],
 ];
 
 const LANES = [
-  ['l-street', 't-blue', 'measure', 'On the street', 'The sensor itself, built from parts that cost about $70.', [
-    ['chip', 'ESP32-S3 microcontroller', 'Reads the sensors, filters out splashes, and sends a reading every 10 seconds over Wi-Fi.'],
-    ['waves', 'Waterproof ultrasonic sensor', 'Measures the distance down to the water from up to 15 feet away.'],
-    ['thermo', 'Temperature probe', 'Tracks the air temperature so the app can warn about ice.'],
-    ['sun', 'Solar charger and battery', 'Keeps the sensor running through cloudy days and power outages.'],
-    ['phone', 'Phone setup page', 'Lets anyone connect the sensor to Wi-Fi and pair it without touching code.'],
+  ['On the street', 'The sensor itself, built from parts that cost about $70.', [
+    ['ESP32-S3 microcontroller', 'Reads the sensors, filters out splashes, and sends a reading every 10 seconds over Wi-Fi.'],
+    ['Waterproof ultrasonic sensor', 'Measures the distance down to the water from up to 15 feet away.'],
+    ['Temperature probe', 'Tracks the air temperature so the app can warn about ice.'],
+    ['Solar charger and battery', 'Keeps the sensor running through cloudy days and power outages.'],
+    ['Phone setup page', 'Lets anyone connect the sensor to Wi-Fi and pair it without touching code.'],
   ]],
-  ['l-cloud', 't-mint', 'database', 'In the cloud', 'Where readings are stored, protected, and turned into predictions.', [
-    ['database', 'Supabase and Postgres', 'Stores readings, sensors, and accounts, and pushes new readings to the map the moment they arrive.'],
-    ['shield', 'Row-level security', 'Keeps home sensors private and limits street sensors to verified town staff.'],
-    ['key', 'Server-side checks', 'Handle sensor pairing, report removal, and spam limits so they can\'t be bypassed.'],
-    ['nodes', 'Neural network forecast', 'Trained in Python with scikit-learn on seven years of USGS river readings.'],
+  ['In the cloud', 'Where readings are stored, protected, and turned into predictions.', [
+    ['Supabase and Postgres', 'Stores readings, sensors, and accounts, and pushes new readings to the map the moment they arrive.'],
+    ['Row-level security', 'Keeps home sensors private and limits street sensors to verified town staff.'],
+    ['Server-side checks', 'Handle sensor pairing, report removal, and spam limits so they can\'t be bypassed.'],
+    ['Neural network forecast', 'Trained in Python with scikit-learn on seven years of USGS river readings.'],
   ]],
-  ['l-screen', 't-sun', 'map', 'On your screen', 'A web app that runs on any phone or laptop with nothing to install.', [
-    ['code', 'JavaScript web app', 'Hosted on GitHub Pages and built without a framework, so it loads quickly.'],
-    ['layers', 'Leaflet maps', 'Draws the map, the sensors, resident reports, and the risk shading.'],
-    ['mountain', 'Terrain flood model', 'Finds low spots and drainage paths from elevation data, right in the browser.'],
-    ['chart', 'Chart.js', 'Plots each sensor\'s water level along with its forecast for the next hour.'],
+  ['On your screen', 'A web app that runs on any phone or laptop with nothing to install.', [
+    ['JavaScript web app', 'Hosted on GitHub Pages and built without a framework, so it loads quickly.'],
+    ['Leaflet maps', 'Draws the map, the sensors, resident reports, and the risk shading.'],
+    ['Terrain flood model', 'Finds low spots and drainage paths from elevation data, right in the browser.'],
+    ['Chart.js', 'Plots each sensor\'s water level along with its forecast for the next hour.'],
   ]],
 ];
 
 const SOURCES = [
-  ['mountain', 'USGS 3DEP', 'Elevation for any spot in the US, with global coverage from other sources'],
-  ['river', 'USGS river gauges', 'Seven years of readings used to train the forecast'],
-  ['rain', 'Open-Meteo', 'Hourly rainfall and the forecast for anywhere in the world'],
-  ['alert', 'National Weather Service', 'Active flood watches and warnings'],
-  ['shield', 'FEMA', 'Official flood zone maps for the United States'],
-  ['pin', 'OpenStreetMap', 'Roads, place search, and the base map'],
+  ['USGS 3DEP', 'elevation'],
+  ['USGS river gauges', 'forecast training data'],
+  ['Open-Meteo', 'rainfall and forecasts'],
+  ['National Weather Service', 'flood watches and warnings'],
+  ['FEMA', 'official flood zones'],
+  ['OpenStreetMap', 'roads, places, and the base map'],
 ];
 
 const WHO = [
-  ['car', 't-blue', 'Drivers and residents', 'Look up any address, check your route before heading out, and report flooding you come across.', 'Open the map', 'map'],
-  ['home', 't-mint', 'Homeowners', 'A sensor in the basement alerts your phone at the first sign of standing water, even during a power outage.', 'Add a home sensor', 'mine'],
-  ['city', 't-coral', 'Town staff', 'See every street sensor at a glance, add new ones in minutes, and find the low spots that still need coverage.', 'Staff sign in', 'auth'],
+  ['Drivers and residents', 'Look up any address, check your route before heading out, and report flooding you come across.', 'Open the map', 'map'],
+  ['Homeowners', 'A sensor in the basement alerts your phone at the first sign of standing water, even during a power outage.', 'Add a home sensor', 'mine'],
+  ['Town staff', 'See every street sensor at a glance, add new ones in minutes, and find the low spots that still need coverage.', 'Staff sign in', 'auth'],
 ];
 
 export function welcomeHtml() {
-  const flow = FLOW.map(([ic, tone, title, text]) => `<div class="${tone}"><div class="bubble">${icon(ic)}</div><h3>${title}</h3><p>${text}</p></div>`).join('');
-  const lanes = LANES.map(([cls, tone, ic, title, intro, parts], k) => `
-    ${k ? '<div class="arrow-gap"><span>&rarr;</span></div>' : ''}
-    <div class="lane ${cls} ${tone}">
-      <h3><span class="chip">${icon(ic)}</span>${title}</h3>
+  const steps = STEPS.map(([title, text], k) => `<div><span class="num">0${k + 1}</span><h3><span>${title}</span></h3><p>${text}</p></div>`).join('');
+  const photos = PHOTOS.map(([file, caption]) => `<figure><img src="img/${file}" alt="${caption}" loading="lazy" onerror="this.parentElement.remove()"><figcaption>${caption}</figcaption></figure>`).join('');
+  const lanes = LANES.map(([title, intro, parts]) => `
+    <div class="lane">
+      <h3>${title}</h3>
       <p>${intro}</p>
-      ${parts.map(([pi, name, role]) => `<div class="part ${tone}"><span class="chip">${icon(pi)}</span><div><strong>${name}</strong><span>${role}</span></div></div>`).join('')}
+      ${parts.map(([name, role]) => `<div class="part"><strong>${name}</strong><span>${role}</span></div>`).join('')}
     </div>`).join('');
-  const sources = SOURCES.map(([ic, name, what]) => `<div class="source t-deep"><span class="chip">${icon(ic)}</span><strong>${name}</strong><span>${what}</span></div>`).join('');
-  const who = WHO.map(([ic, tone, title, text, action, go]) => `<div class="${tone}"><div class="bubble">${icon(ic)}</div><h3>${title}</h3><p>${text}</p><button class="link" data-welcome="${go}">${action}</button></div>`).join('');
+  const sources = SOURCES.map(([name, what]) => `<div class="source"><strong>${name}</strong><span>${what}</span></div>`).join('');
+  const who = WHO.map(([title, text, action, go]) => `<div class="who-col"><h3><span>${title}</span></h3><p>${text}</p><button class="link" data-welcome="${go}">${action}</button></div>`).join('');
   return `
     <section class="w-hero contours">
       <div class="w-inner">
@@ -125,14 +134,15 @@ export function welcomeHtml() {
     <section class="w-section" id="how-it-works">
       <div class="w-inner">
         <h2>How it works</h2>
-        <p class="w-intro">Four steps take a reading from a puddle under a sensor to an alert on someone's phone.</p>
-        <div class="flow">${flow}</div>
+        <p class="w-intro">It takes four steps to get from a puddle under a sensor to an alert on someone's phone.</p>
+        <div class="w-cols four">${steps}</div>
+        <div class="photos">${photos}</div>
       </div>
     </section>
     <section class="w-section w-built" id="how-its-built">
       <div class="w-inner">
         <h2>How it's built</h2>
-        <p class="w-intro">Every reading travels from the street, through the cloud, to your screen. Here is what handles each part of that trip.</p>
+        <p class="w-intro">Every reading travels from the street, through the cloud, to your screen. These are the pieces that handle each part of that trip.</p>
         <div class="stack">${lanes}</div>
         <div class="sources"><h3>Public data it reads</h3><div class="source-row">${sources}</div></div>
       </div>
@@ -141,7 +151,7 @@ export function welcomeHtml() {
       <div class="w-inner">
         <h2>Who it's for</h2>
         <p class="w-intro">The same map serves three kinds of people, each with their own tools.</p>
-        <div class="who">${who}</div>
+        <div class="w-cols three">${who}</div>
       </div>
     </section>
     <footer class="w-inner w-foot">Elevation from USGS 3DEP and AWS Terrain Tiles. Weather from Open-Meteo and the National Weather Service. Flood zones from FEMA. River data from the USGS. Map data from OpenStreetMap contributors.</footer>`;
